@@ -1,0 +1,9 @@
+{
+  "camera_id": "CAM-001",
+  "name": "Main Highway Intersection",
+  "lat": 12.9715987,
+  "lng": 77.5945627,
+  "status": "ONLINE",
+  "stream_url": "rtsp://camera1.local/stream",
+  "fps": 30
+}

@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0a0e17; /* tactical-dark */
+  color: #94a3b8; /* slate-400 */
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b; /* slate-800 */
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155; /* slate-700 */
+}

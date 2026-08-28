@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "camera_id",
+    "timestamp",
+    "epoch_ms",
+    "license_plate",
+    "bounding_box",
+    "vehicle_attributes",
+    "speed_kmh",
+    "heading_degrees",
+    "reid_embeddings"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "camera_id": {
+      "type": "string",
+      "pattern": "^CAM-[0-9]{3}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "epoch_ms": {
+      "type": "integer"
+    },
+    "license_plate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "confidence", "is_clean"],
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "is_clean": {
+          "type": "boolean"
+        }
+      }
+    },
+    "bounding_box": {
+      "description": "Bounding box in [xmin, ymin, xmax, ymax] format, normalized between 0.0 and 1.0",
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0.0,
+        "maximum": 1.0
+      },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "vehicle_attributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "color", "color_confidence"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["SEDAN", "SUV", "HATCHBACK", "TRUCK", "BUS", "MOTORCYCLE"]
+        },
+        "color": {
+          "type": "string",
+          "enum": ["WHITE", "BLACK", "SILVER", "GREY", "RED", "BLUE", "OTHER"]
+        },
+        "color_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      }
+    },
+    "speed_kmh": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 250.0
+    },
+    "heading_degrees": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 360.0
+    },
+    "reid_embeddings": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 128,
+      "maxItems": 128
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "alert_id",
+    "alert_type",
+    "severity",
+    "target_plate",
+    "source_camera_id",
+    "details",
+    "created_at"
+  ],
+  "properties": {
+    "alert_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "alert_type": {
+      "type": "string",
+      "enum": ["HOTLIST_HIT", "CLONED_PLATE_SPOOF", "SPEED_VIOLATION", "BLIND_SPOT_DEVIATION"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["CRITICAL", "HIGH", "MEDIUM", "INFO"]
+    },
+    "target_plate": {
+      "type": "string"
+    },
+    "source_camera_id": {
+      "type": "string",
+      "pattern": "^CAM-[0-9]{3}$"
+    },
+    "details": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

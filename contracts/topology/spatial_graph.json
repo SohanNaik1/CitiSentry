@@ -1,0 +1,44 @@
+[
+  {
+    "source": "CAM-001",
+    "destination": "CAM-005",
+    "distance_meters": 1500,
+    "speed_limit_kmh": 40
+  },
+  {
+    "source": "CAM-005",
+    "destination": "CAM-001",
+    "distance_meters": 1500,
+    "speed_limit_kmh": 40
+  },
+  {
+    "source": "CAM-001",
+    "destination": "CAM-002",
+    "distance_meters": 6000,
+    "speed_limit_kmh": 50
+  },
+  {
+    "source": "CAM-002",
+    "destination": "CAM-003",
+    "distance_meters": 5500,
+    "speed_limit_kmh": 50
+  },
+  {
+    "source": "CAM-003",
+    "destination": "CAM-002",
+    "distance_meters": 5500,
+    "speed_limit_kmh": 50
+  },
+  {
+    "source": "CAM-003",
+    "destination": "CAM-004",
+    "distance_meters": 3000,
+    "speed_limit_kmh": 60
+  },
+  {
+    "source": "CAM-004",
+    "destination": "CAM-003",
+    "distance_meters": 3000,
+    "speed_limit_kmh": 60
+  }
+]

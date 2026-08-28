@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "camera_id",
+    "name",
+    "lat",
+    "lng",
+    "status",
+    "stream_url",
+    "fps"
+  ],
+  "properties": {
+    "camera_id": {
+      "type": "string",
+      "pattern": "^CAM-[0-9]{3}$"
+    },
+    "name": {
+      "type": "string"
+    },
+    "lat": {
+      "type": "number",
+      "minimum": -90.0,
+      "maximum": 90.0
+    },
+    "lng": {
+      "type": "number",
+      "minimum": -180.0,
+      "maximum": 180.0
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ONLINE", "OFFLINE", "DEGRADED"]
+    },
+    "stream_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "fps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120
+    }
+  }
+}

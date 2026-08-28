@@ -1,0 +1,9 @@
+{
+  "alert_id": "123e4567-e89b-12d3-a456-426614174001",
+  "alert_type": "HOTLIST_HIT",
+  "severity": "CRITICAL",
+  "target_plate": "KA01AB1234",
+  "source_camera_id": "CAM-001",
+  "details": "Stolen vehicle detected by CAM-001.",
+  "created_at": "2026-08-28T16:28:22Z"
+}
