@@ -11,21 +11,21 @@ The repository is built as a unified multi-service architecture comprising three
    - `contracts/schemas/`: Draft-07 JSON schemas for `camera_node`, `telemetry_event`, and `alert_event`.
    - `contracts/topology/`: Spatial graph definition and camera registry for the city grid.
 
-2. **Backend & Simulation (Data Ingestion & Processing)**
-   - **Core Broker (Go)**: A high-concurrency event broker utilizing Go 1.22+. It processes telemetry, executes spatial constraints, and streams enriched data via WebSocket to the frontend.
-   - **Edge Simulator (Python)**: A robust CLI harness for generating and replaying deterministic, time-series telemetry events (e.g., pursuit scenarios, spoofed plates) to stress-test the broker.
+2. **Backend Services (Data Ingestion & Processing)**
+   - **Core Broker (Go)**: A high-concurrency event broker utilizing Go 1.22+. It acts as the central hub, orchestrating the Python vision pipelines, receiving telemetry, evaluating spatial constraints, and broadcasting enriched data via WebSocket to the frontend.
+   - **Edge Vision Node (Python)**: A robust OpenCV and YOLOv8-powered tracking engine wrapped in a Flask API. It processes raw camera feeds, executes object detection (BotSORT/ByteTrack), and streams a live MJPEG visual feed to the browser. It supports interactive Region of Interest (ROI) selection to track specific vehicles on demand.
 
 3. **Tactical Command Dashboard (Next.js)**
    An operational Next.js 14+ frontend designed for defense/police operators.
    - **Stack**: React 18, Next.js (App Router), Tailwind CSS (Tactical Dark Theme), Zustand, React-Leaflet.
-   - **Features**: Synchronized video viewports, HTML5 Canvas telemetry overlays, CartoDB spatial mapping, and real-time event feeds.
+   - **Features**: Synchronized MJPEG video viewports, interactive ROI tracking overlay, CartoDB spatial mapping, and real-time event feeds.
 
 ## Prerequisites
 
 - **Node.js**: v18.17+
 - **Go**: v1.22+
-- **Python**: v3.11+ (with `pip` and `virtualenv`)
-- **CARTO API Key**: Required for base map tiles (update environment variables accordingly).
+- **Python**: v3.11+ (with `pip`)
+- **System**: ffmpeg, libgl1-mesa-glx (for OpenCV)
 
 ## Getting Started
 
@@ -41,26 +41,23 @@ npm run dev
 
 The application will be accessible at `http://localhost:3000`.
 
-### 2. Edge Simulator
+### 2. Edge Vision & Core Broker
 
-Navigate to the `services/edge-simulator` directory to generate and replay scenarios:
+The Go Core Broker automatically orchestrates the Python Edge Vision node. Ensure you have installed the Python dependencies before starting the Go broker:
 
 ```bash
-cd services/edge-simulator
-python3 -m venv .venv
-source .venv/bin/activate
+cd services/edge-vision
 pip install -r requirements.txt
-
-# Generate mock scenario datasets
-python scenarios/generate_scenarios.py
-
-# Replay a specific scenario to the broker
-python simulator.py --scenario scenarios/pursuit_scenario.json --speed 1.0
 ```
 
-### 3. Core Broker
+Navigate to `services/core-broker` to run the ingestion engine and vision pipeline:
 
-*(Under active development)* Navigate to `services/core-broker` to run the ingestion engine.
+```bash
+cd services/core-broker
+go run cmd/server/main.go
+```
+
+The broker will listen on `:8080` for WebSocket connections from the dashboard, and the Python vision node will spawn on `:5000` to serve the live MJPEG feed.
 
 ## Code Standards & Directives
 

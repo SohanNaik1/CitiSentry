@@ -1,13 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, MouseEvent } from 'react';
 import { useTelemetryStore } from '../../stores/useTelemetryStore';
-import cameraNodes from '../../../../contracts/topology/camera_nodes.json';
 
 export default function VideoViewport() {
-  const activeTarget = useTelemetryStore((state) => state.activeTarget);
-  const activeCameraId = useTelemetryStore((state) => state.activeCameraId);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const trackedPlate = useTelemetryStore((state) => state.trackedPlate);
+  const trackAttempt = useTelemetryStore((state) => state.trackAttempt);
   const [currentTime, setCurrentTime] = useState('');
 
   // Update clock every second
@@ -18,109 +16,143 @@ export default function VideoViewport() {
     return () => clearInterval(id);
   }, []);
 
-  const activeCamera = cameraNodes.find((n) => n.camera_id === activeCameraId);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+  const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
+  const [isSelectingMode, setIsSelectingMode] = useState(false);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    // Also reset video to beginning on mount
+    fetch('http://localhost:5000/reset', { method: 'POST' }).catch(() => {});
+  }, []);
 
-    const resizeCanvas = () => {
-      canvas.width = canvas.clientWidth;
-      canvas.height = canvas.clientHeight;
-    };
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
+  useEffect(() => {
+    if (trackedPlate) {
+      setIsSelectingMode(true);
+      setIsDrawing(false);
+    } else {
+      setIsSelectingMode(false);
+      setIsDrawing(false);
+    }
+  }, [trackedPlate, trackAttempt]);
 
-    const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (activeTarget && activeTarget.bounding_box) {
-        const [xmin, ymin, xmax, ymax] = activeTarget.bounding_box;
-        const x = xmin * canvas.width;
-        const y = ymin * canvas.height;
-        const w = (xmax - xmin) * canvas.width;
-        const h = (ymax - ymin) * canvas.height;
+  const handleMouseDown = (e: MouseEvent) => {
+    if (!isSelectingMode) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setStartPos({ x, y });
+    setCurrentPos({ x, y });
+    setIsDrawing(true);
+  };
 
-        const isSuspect = activeTarget.license_plate.confidence < 0.85;
-        const color = isSuspect ? '#ef4444' : '#06b6d4';
+  const handleMouseMove = (e: MouseEvent) => {
+    if (!isDrawing || !isSelectingMode) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setCurrentPos({ x, y });
+  };
 
-        // Dashed main box
-        ctx.setLineDash([6, 3]);
-        ctx.strokeStyle = color + '88';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x, y, w, h);
-        ctx.setLineDash([]);
+  const handleMouseUp = async () => {
+    if (!isDrawing || !isSelectingMode) return;
+    setIsDrawing(false);
+    setIsSelectingMode(false);
 
-        // Solid corner brackets
-        const bL = Math.min(18, w * 0.2, h * 0.2);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        [
-          [[x, y + bL], [x, y], [x + bL, y]],
-          [[x + w - bL, y], [x + w, y], [x + w, y + bL]],
-          [[x, y + h - bL], [x, y + h], [x + bL, y + h]],
-          [[x + w - bL, y + h], [x + w, y + h], [x + w, y + h - bL]],
-        ].forEach(([[ax, ay], [bx, by], [cx, cy]]) => {
-          ctx.beginPath();
-          ctx.moveTo(ax, ay);
-          ctx.lineTo(bx, by);
-          ctx.lineTo(cx, cy);
-          ctx.stroke();
-        });
+    if (!imgRef.current || !containerRef.current || !trackedPlate) return;
 
-        // Label pill
-        const label = `${activeTarget.license_plate.text}  ${activeTarget.speed_kmh} km/h`;
-        ctx.font = 'bold 11px monospace';
-        const tw = ctx.measureText(label).width;
-        const lx = Math.max(x, 4);
-        const ly = y > 22 ? y - 22 : y + h + 4;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.roundRect(lx, ly, tw + 16, 20, 4);
-        ctx.fill();
-        ctx.fillStyle = '#09090b';
-        ctx.fillText(label, lx + 8, ly + 14);
-      }
-    };
+    // To accurately map the coordinates over object-contain image:
+    const img = imgRef.current;
+    const rect = containerRef.current.getBoundingClientRect();
+    
+    // Fallback if naturalWidth isn't available right away
+    const intrinsicW = img.naturalWidth || 1280;
+    const intrinsicH = img.naturalHeight || 720;
+    
+    // Calculate the scale and rendered dimensions
+    const scale = Math.min(rect.width / intrinsicW, rect.height / intrinsicH);
+    const renderedW = intrinsicW * scale;
+    const renderedH = intrinsicH * scale;
 
-    draw();
-    return () => window.removeEventListener('resize', resizeCanvas);
-  }, [activeTarget, activeCameraId]);
+    // Calculate offsets (the letterbox/pillarbox empty spaces)
+    const offsetX = (rect.width - renderedW) / 2;
+    const offsetY = (rect.height - renderedH) / 2;
+
+    const xminRaw = Math.min(startPos.x, currentPos.x) - offsetX;
+    const yminRaw = Math.min(startPos.y, currentPos.y) - offsetY;
+    const xmaxRaw = Math.max(startPos.x, currentPos.x) - offsetX;
+    const ymaxRaw = Math.max(startPos.y, currentPos.y) - offsetY;
+
+    // Normalize against the *rendered* image dimensions
+    const xmin = Math.max(0, Math.min(1, xminRaw / renderedW));
+    const ymin = Math.max(0, Math.min(1, yminRaw / renderedH));
+    const xmax = Math.max(0, Math.min(1, xmaxRaw / renderedW));
+    const ymax = Math.max(0, Math.min(1, ymaxRaw / renderedH));
+
+    try {
+      await fetch('http://localhost:5000/set_target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plate: trackedPlate, roi: [xmin, ymin, xmax, ymax] }),
+      });
+    } catch (err) {
+      console.error('Failed to set target on vision node:', err);
+    }
+  };
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-      {/* Camera header bar */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-950 border-b border-zinc-800 shrink-0">
+    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800 shadow-[inset_0_0_20px_rgba(0,0,0,0.8)]">
+      {/* Top Bar HUD */}
+      <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-gradient-to-b from-black/80 to-transparent pointer-events-none">
         <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-online shadow-[0_0_6px_#10b981] inline-block"></span>
-          <span className="font-mono text-xs text-cyan-telemetry tracking-widest">
-            {activeCamera ? `[ ${activeCamera.camera_id} : ${activeCamera.name.toUpperCase()} ]` : '[ NO CAMERA SOURCE ]'}
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-online shadow-[0_0_8px_#10b981] animate-pulse"></span>
+          <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
+            [ LIVE STREAM ]
           </span>
         </div>
-        <div className="flex items-center gap-3 font-mono text-[10px] text-zinc-500">
-          {activeCamera && <span>{activeCamera.fps} FPS</span>}
-          <span className="text-zinc-400">{currentTime}</span>
-        </div>
+        <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
       </div>
 
-      {/* Video + Canvas */}
-      <div className="relative flex-1 bg-black flex items-center justify-center">
-        {activeCameraId ? (
-          <>
-            <video
-              className="absolute inset-0 w-full h-full object-cover"
-              autoPlay loop muted playsInline
-              src="https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
-            />
-            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
-          </>
-        ) : (
-          <span className="text-zinc-600 animate-pulse font-mono tracking-widest text-sm">
-            [ AWAITING CAMERA STREAM ]
-          </span>
+      {/* The MJPEG Stream */}
+      <img
+        ref={imgRef}
+        src="http://localhost:5000/video_feed"
+        className="w-full h-full object-contain pointer-events-none"
+        alt="Camera Feed"
+        draggable={false}
+      />
+
+      {/* Overlay for ROI Dragging */}
+      <div
+        ref={containerRef}
+        className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+      >
+        {isDrawing && (
+          <div
+            className="absolute border border-cyan-telemetry shadow-[0_0_10px_rgba(6,182,212,0.5)] bg-cyan-telemetry/10"
+            style={{
+              left: Math.min(startPos.x, currentPos.x),
+              top: Math.min(startPos.y, currentPos.y),
+              width: Math.abs(currentPos.x - startPos.x),
+              height: Math.abs(currentPos.y - startPos.y),
+            }}
+          />
         )}
       </div>
+
+      {isSelectingMode && !isDrawing && (
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded shadow-[0_0_15px_rgba(0,0,0,0.5)] pointer-events-none uppercase tracking-widest z-30 animate-pulse">
+          DRAW ROI OVER TARGET
+        </div>
+      )}
     </div>
   );
 }
