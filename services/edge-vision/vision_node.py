@@ -33,6 +33,10 @@ MAX_CONSECUTIVE_MISSES = 90
 dispatch_count = 0
 is_paused = False
 
+target_roi = None
+roi_search_frames = 0
+MAX_ROI_SEARCH_FRAMES = 30
+
 latest_jpeg = None
 frame_condition = threading.Condition()
 
@@ -57,7 +61,7 @@ def compute_iou(box_a: list[float], box_b: list[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 def process_video():
-    global cap, latest_jpeg, target_track_id, target_plate, target_class, consecutive_misses, dispatch_count, is_paused
+    global cap, latest_jpeg, target_track_id, target_plate, target_class, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames
     
     frame_count = 0
     SPEED_WINDOW = 15
@@ -72,6 +76,8 @@ def process_video():
             current_target_id = target_track_id
             current_target_plate = target_plate
             current_paused = is_paused
+            current_roi = target_roi
+            current_roi_frames = roi_search_frames
             
         if current_paused:
             time.sleep(0.1)
@@ -85,9 +91,57 @@ def process_video():
             
         frame_count += 1
 
-        if current_target_id is not None:
+        if current_target_id is not None or current_roi is not None:
             results = model.track(frame, persist=True, tracker="botsort.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=0.25)
             
+            if current_roi is not None:
+                found_id = None
+                found_class = "VEHICLE"
+                
+                if results[0].boxes is not None and results[0].boxes.id is not None:
+                    boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
+                    ids = results[0].boxes.id.cpu().numpy().tolist()
+                    classes = results[0].boxes.cls.cpu().numpy().tolist()
+                    
+                    best_iou = 0.0
+                    for i in range(len(boxes)):
+                        iou = compute_iou(current_roi, boxes[i])
+                        if iou > best_iou:
+                            best_iou = iou
+                            found_id = ids[i]
+                            found_class = model.names[int(classes[i])]
+                            
+                    if found_id is None:
+                        user_cx = (current_roi[0] + current_roi[2]) / 2
+                        user_cy = (current_roi[1] + current_roi[3]) / 2
+                        user_w = current_roi[2] - current_roi[0]
+                        user_h = current_roi[3] - current_roi[1]
+                        max_allowed_dist = max(user_w, user_h, 150) * 1.5
+                        
+                        min_dist = float("inf")
+                        for i in range(len(boxes)):
+                            cx = (boxes[i][0] + boxes[i][2]) / 2
+                            cy = (boxes[i][1] + boxes[i][3]) / 2
+                            dist = ((cx - user_cx) ** 2 + (cy - user_cy) ** 2) ** 0.5
+                            if dist < min_dist and dist < max_allowed_dist:
+                                min_dist = dist
+                                found_id = ids[i]
+                                found_class = model.names[int(classes[i])]
+                
+                with state_lock:
+                    if found_id is not None:
+                        target_track_id = found_id
+                        target_class = found_class
+                        target_roi = None
+                        print(f"\n[VISION] LOCKED onto Track ID: {found_id}")
+                    else:
+                        roi_search_frames -= 1
+                        if roi_search_frames <= 0:
+                            target_roi = None
+                            print("\n[ERROR] Search timed out. No objects found.")
+                
+                continue
+
             tracked_xyxy = None
             if results[0].boxes is not None and results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
@@ -224,7 +278,7 @@ def reset_video():
 
 @app.route('/set_target', methods=['POST'])
 def set_target():
-    global target_track_id, target_plate, target_class, consecutive_misses, is_paused
+    global target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames
     
     data = request.json
     if not data or 'plate' not in data or 'roi' not in data:
@@ -233,14 +287,6 @@ def set_target():
     plate = data['plate']
     roi_norm = data['roi'] # [xmin, ymin, xmax, ymax] normalized
     
-    if cap is None:
-        return jsonify({"error": "Video capture not initialized"}), 500
-
-    # Read current frame to initialize tracking
-    ret, frame = cap.read()
-    if not ret:
-        return jsonify({"error": "Could not read frame"}), 500
-
     user_xyxy = [
         roi_norm[0] * frame_width,
         roi_norm[1] * frame_height,
@@ -248,60 +294,18 @@ def set_target():
         roi_norm[3] * frame_height
     ]
 
-    print(f"\n[VISION] Setting target {plate} with ROI: {user_xyxy}")
+    print(f"\n[VISION] Initiating search for {plate} with ROI: {user_xyxy}")
     
-    init_results = model.track(frame, persist=True, tracker="botsort.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=0.25)
-    
-    found_id = None
-    found_class = "VEHICLE"
-    
-    if init_results[0].boxes is not None and init_results[0].boxes.id is not None:
-        boxes = init_results[0].boxes.xyxy.cpu().numpy().tolist()
-        ids = init_results[0].boxes.id.cpu().numpy().tolist()
-        classes = init_results[0].boxes.cls.cpu().numpy().tolist()
-
-        best_iou = 0.0
-        for i in range(len(boxes)):
-            iou = compute_iou(user_xyxy, boxes[i])
-            if iou > best_iou:
-                best_iou = iou
-                found_id = ids[i]
-                found_class = model.names[int(classes[i])]
-
-        if found_id is None:
-            # Fallback to center-distance with a strict threshold
-            user_cx = (user_xyxy[0] + user_xyxy[2]) / 2
-            user_cy = (user_xyxy[1] + user_xyxy[3]) / 2
-            user_w = user_xyxy[2] - user_xyxy[0]
-            user_h = user_xyxy[3] - user_xyxy[1]
-            max_allowed_dist = max(user_w, user_h, 100) * 1.5 # dynamic threshold with minimum 150px
-            
-            min_dist = float("inf")
-
-            for i in range(len(boxes)):
-                cx = (boxes[i][0] + boxes[i][2]) / 2
-                cy = (boxes[i][1] + boxes[i][3]) / 2
-                dist = ((cx - user_cx) ** 2 + (cy - user_cy) ** 2) ** 0.5
-                if dist < min_dist and dist < max_allowed_dist:
-                    min_dist = dist
-                    found_id = ids[i]
-                    found_class = model.names[int(classes[i])]
-
-    if found_id is not None:
-        with state_lock:
-            target_track_id = found_id
-            target_plate = plate
-            target_class = found_class
-            consecutive_misses = 0
-            is_paused = False
-        print(f"[VISION] LOCKED onto Track ID: {found_id}, Class: {found_class}")
-        return jsonify({"status": "success", "track_id": found_id})
-    else:
-        with state_lock:
-            # Unpause even on failure, so the user can try again!
-            is_paused = False
-        print("[ERROR] No matching objects found.")
-        return jsonify({"error": "No objects found matching ROI"}), 404
+    with state_lock:
+        target_roi = user_xyxy
+        roi_search_frames = MAX_ROI_SEARCH_FRAMES
+        target_track_id = None
+        target_plate = plate
+        target_class = "VEHICLE"
+        consecutive_misses = 0
+        is_paused = False
+        
+    return jsonify({"status": "searching"})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CitiSentry Flask Vision Node")

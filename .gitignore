@@ -44,4 +44,11 @@ obj/
 # Data & Config
 *.log
 coverage.out
-\n# ML Models & Temp Files\n*.pt\n*.part\n*.onnx\n\n# Binaries\nbroker
+
+# ML Models & Temp Files
+*.pt
+*.part
+*.onnx
+
+# Binaries
+broker
