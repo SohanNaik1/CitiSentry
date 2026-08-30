@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -93,10 +94,16 @@ func main() {
 	}()
 
 	// Spawn the Python Flask server for MJPEG vision
-	pythonExe, _ := filepath.Abs("../../.venv/bin/python3")
+	pythonExe := "python3"
+	if runtime.GOOS == "windows" {
+		pythonExe = "python"
+	}
+	
 	scriptAbsPath, _ := filepath.Abs("../edge-vision/vision_node.py")
+	videoAbsPath, _ := filepath.Abs("../../web/public/videos/traffic.mp4")
+	
 	visionCmd := exec.Command(pythonExe, scriptAbsPath,
-		"--video", "../../web/public/videos/traffic.mp4",
+		"--video", videoAbsPath,
 		"--camera_id", "CAM-001",
 	)
 	visionCmd.Stdout = os.Stdout
@@ -115,7 +122,7 @@ func main() {
 
 	if visionCmd.Process != nil {
 		log.Printf("[SHUTDOWN] Killing Python vision node (PID %d)...", visionCmd.Process.Pid)
-		visionCmd.Process.Signal(syscall.SIGTERM)
+		visionCmd.Process.Kill()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
