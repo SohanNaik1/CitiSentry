@@ -22,3 +22,9 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #334155; /* slate-700 */
 }
+
+/* Leaflet Cluster and DivIcon Overrides */
+.leaflet-div-icon {
+  background: transparent !important;
+  border: none !important;
+}

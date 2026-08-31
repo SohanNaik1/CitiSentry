@@ -1,70 +1,80 @@
-# CitiSentry: Tactical Multi-Camera ANPR Trajectory Engine
+# CitiSentry: Multi-Camera AI Tracking System
 
-CitiSentry is a high-performance, command-and-control (C2) spatial topology engine designed for defense, smart mobility, and urban surveillance operations. The system processes real-time Automatic Number Plate Recognition (ANPR) telemetry across a multi-node camera network to compute trajectories, identify anomalies (e.g., cloned plates, speed violations), and visualize targets on a geospatial tactical interface.
+CitiSentry is a computer vision and data processing system designed to track vehicles across a network of city cameras. It reads license plates, calculates vehicle speeds, and tracks movement on a live map in real time. 
 
-## System Architecture
+The software is divided into three main components working together:
+1. **Edge Vision (Python)**: Analyzes video feeds using AI to detect vehicles and read license plates.
+2. **Core Broker (Go)**: Acts as the central brain. It receives data from the cameras and routes it to the frontend.
+3. **Web Dashboard (Next.js)**: The user interface where operators can view the live map, watch video feeds, and monitor alerts.
 
-The repository is built as a unified multi-service architecture comprising three core layers:
-
-1. **Contracts (Data Definition Layer)**
-   Contains the canonical JSON schemas, sample payloads, and spatial topology configuration. This ensures strict type safety and data integrity across the entire stack.
-   - `contracts/schemas/`: Draft-07 JSON schemas for `camera_node`, `telemetry_event`, and `alert_event`.
-   - `contracts/topology/`: Spatial graph definition and camera registry for the city grid.
-
-2. **Backend Services (Data Ingestion & Processing)**
-   - **Core Broker (Go)**: A high-concurrency event broker utilizing Go 1.22+. It acts as the central hub, orchestrating the Python vision pipelines, receiving telemetry, evaluating spatial constraints, and broadcasting enriched data via WebSocket to the frontend.
-   - **Edge Vision Node (Python)**: A robust OpenCV and YOLOv8-powered tracking engine wrapped in a Flask API. It processes raw camera feeds, executes object detection (BotSORT/ByteTrack), and streams a live MJPEG visual feed to the browser. It supports interactive Region of Interest (ROI) selection to track specific vehicles on demand.
-
-3. **Tactical Command Dashboard (Next.js)**
-   An operational Next.js 14+ frontend designed for defense/police operators.
-   - **Stack**: React 18, Next.js (App Router), Tailwind CSS (Tactical Dark Theme), Zustand, React-Leaflet.
-   - **Features**: Synchronized MJPEG video viewports, interactive ROI tracking overlay, CartoDB spatial mapping, and real-time event feeds.
+---
 
 ## Prerequisites
 
-- **Node.js**: v18.17+
-- **Go**: v1.22+
-- **Python**: v3.11+ (with `pip`)
-- **System**: ffmpeg, libgl1-mesa-glx (for OpenCV)
+Before running the project, you must have the following software installed on your computer.
 
-## Getting Started
+### Required Software
+- **Node.js** (v18 or higher)
+- **Go** (v1.22 or higher)
+- **Python** (v3.11 or higher)
 
-### 1. Web Dashboard (Frontend)
+### System-Specific Requirements
 
-Navigate to the `web` directory to launch the Tactical Command Dashboard:
+**For Windows:**
+No additional system packages are required, provided Python, Go, and Node.js are added to your System PATH during installation.
 
+**For Linux (CachyOS, Ubuntu, Arch, etc.):**
+You must install `ffmpeg` and OpenGL libraries for the video processing pipeline to work properly.
+- Arch/CachyOS: `sudo pacman -S ffmpeg mesa`
+- Ubuntu/Debian: `sudo apt install ffmpeg libgl1-mesa-glx`
+
+---
+
+## Initial Setup
+
+You only need to perform these steps once to install the required libraries.
+
+1. Open your terminal or command prompt.
+2. Navigate into the project folder.
+3. Install the web dependencies:
+   ```bash
+   cd web
+   npm install --legacy-peer-deps
+   cd ..
+   ```
+4. Set up the Python virtual environment and install the AI dependencies:
+   ```bash
+   cd services/edge-vision
+   python -m venv .venv
+   
+   # On Windows:
+   .venv\Scripts\activate
+   # On Linux:
+   source .venv/bin/activate
+   
+   pip install -r requirements.txt
+   cd ../..
+   ```
+
+---
+
+## Running the Application
+
+To make it as easy as possible to launch the entire system at once, startup scripts are provided in the root directory.
+
+### On Linux
+Run the provided shell script from your terminal:
 ```bash
-cd web
-npm install
-npm run dev
+./start.sh
 ```
 
-The application will be accessible at `http://localhost:3000`.
-
-### 2. Edge Vision & Core Broker
-
-The Go Core Broker automatically orchestrates the Python Edge Vision node. Ensure you have installed the Python dependencies before starting the Go broker:
-
-```bash
-cd services/edge-vision
-pip install -r requirements.txt
+### On Windows
+Double-click the `start.bat` file in your file explorer, or run it from your command prompt:
+```cmd
+start.bat
 ```
 
-Navigate to `services/core-broker` to run the ingestion engine and vision pipeline:
+Once the script finishes booting the services, open your web browser and navigate to:
+**http://localhost:3000**
 
-```bash
-cd services/core-broker
-go run cmd/server/main.go
-```
-
-The broker will listen on `:8080` for WebSocket connections from the dashboard, and the Python vision node will spawn on `:5000` to serve the live MJPEG feed.
-
-## Code Standards & Directives
-
-- **Type Safety**: `strict: true` is enforced across all TypeScript files.
-- **Data Integrity**: Exhaustive validation against JSON schemas is required for all ingress telemetry.
-- **Graceful Degradation**: The system is designed to handle edge cases, including camera blind spots, dirty/occluded plates, and sudden stream drops.
-
-## License
-
-Proprietary Software. All rights reserved.
+To stop the system, go back to the terminal window running the startup script and press `CTRL+C`.

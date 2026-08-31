@@ -18,9 +18,9 @@ export default function AlertPanel() {
   };
 
   return (
-    <section className="h-full border border-slate-800 shadow-[0_0_15px_rgba(0,0,0,0.5)] p-4 rounded-lg bg-tactical-panel flex flex-col">
+    <section className="h-full border border-slate-800 p-4 rounded-lg bg-tactical-panel flex flex-col">
       <div className="flex items-center gap-3 border-b border-slate-800 pb-3 mb-4 shrink-0">
-        <div className="w-2 h-2 rounded-full bg-crimson-alert shadow-[0_0_8px_rgba(239,68,68,1)]"></div>
+        <div className="w-2 h-2 rounded-full bg-crimson-alert"></div>
         <h2 className="text-lg text-crimson-alert uppercase tracking-widest font-bold">
           SYSTEM ALERTS
         </h2>
@@ -35,7 +35,7 @@ export default function AlertPanel() {
           alerts.map((alert, index) => (
             <div 
               key={`${alert.alert_id}-${index}`}
-              className={`border p-3 rounded mb-3 font-mono text-xs shadow-[0_0_10px_rgba(0,0,0,0.2)] ${getSeverityStyle(alert.severity)}`}
+              className={`border p-3 rounded mb-3 font-mono text-xs ${getSeverityStyle(alert.severity)}`}
             >
               <div className="flex justify-between items-center mb-1">
                 <span className="font-bold">{alert.alert_type}</span>

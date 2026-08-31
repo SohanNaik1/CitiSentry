@@ -7,9 +7,9 @@ export default function TelemetryFeed() {
   const telemetryLogs = useTelemetryStore((state) => state.telemetryLogs);
 
   return (
-    <section className="h-full border border-slate-800 shadow-[0_0_15px_rgba(0,0,0,0.5)] p-4 rounded-lg bg-tactical-panel flex flex-col">
+    <section className="h-full border border-slate-800 p-4 rounded-lg bg-tactical-panel flex flex-col">
       <div className="flex items-center gap-3 border-b border-slate-800 pb-3 mb-4 shrink-0">
-        <div className="w-2 h-2 rounded-full bg-cyan-telemetry animate-ping shadow-[0_0_8px_rgba(6,182,212,1)]"></div>
+        <div className="w-2 h-2 rounded-full bg-cyan-telemetry animate-ping"></div>
         <h2 className="text-lg text-cyan-telemetry uppercase tracking-widest font-bold">
           LIVE TELEMETRY STREAM
         </h2>

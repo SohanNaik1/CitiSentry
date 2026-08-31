@@ -52,3 +52,16 @@ coverage.out
 
 # Binaries
 broker
+
+# OS Generated Files
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.directory
+$RECYCLE.BIN/
+
+# Video Files
+*.mp4
+*.mkv
+*.avi
+*.mov

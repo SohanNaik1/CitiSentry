@@ -106,13 +106,12 @@ export default function VideoViewport() {
   };
 
   return (
-    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800 shadow-[inset_0_0_20px_rgba(0,0,0,0.8)]">
+    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800">
       {/* Top Bar HUD */}
-      <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-gradient-to-b from-black/80 to-transparent pointer-events-none">
+      <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-black/60 pointer-events-none">
         <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-online shadow-[0_0_8px_#10b981] animate-pulse"></span>
           <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
-            [ LIVE STREAM ]
+            [ VIDEO FEED ]
           </span>
         </div>
         <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
@@ -137,7 +136,7 @@ export default function VideoViewport() {
       >
         {isDrawing && (
           <div
-            className="absolute border border-cyan-telemetry shadow-[0_0_10px_rgba(6,182,212,0.5)] bg-cyan-telemetry/10"
+            className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
             style={{
               left: Math.min(startPos.x, currentPos.x),
               top: Math.min(startPos.y, currentPos.y),
@@ -149,7 +148,7 @@ export default function VideoViewport() {
       </div>
 
       {isSelectingMode && !isDrawing && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded shadow-[0_0_15px_rgba(0,0,0,0.5)] pointer-events-none uppercase tracking-widest z-30 animate-pulse">
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
           DRAW ROI OVER TARGET
         </div>
       )}

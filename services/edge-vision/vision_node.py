@@ -69,6 +69,14 @@ def process_video():
 
     while True:
         if cap is None:
+            import numpy as np
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+            cv2.putText(frame, "NO SIGNAL", (520, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            ret, jpeg = cv2.imencode('.jpg', frame)
+            if ret:
+                with frame_condition:
+                    latest_jpeg = jpeg.tobytes()
+                    frame_condition.notify_all()
             time.sleep(0.1)
             continue
             
@@ -83,10 +91,23 @@ def process_video():
             time.sleep(0.1)
             continue
             
-        ret, frame = cap.read()
+        current_cap = cap
+        if current_cap is None:
+            continue
+            
+        t0 = time.time()
+        
+        try:
+            ret, frame = current_cap.read()
+        except Exception:
+            ret = False
+            
         if not ret:
             # Loop video for the demo
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            try:
+                current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            except Exception:
+                pass
             continue
             
         frame_count += 1
@@ -234,8 +255,26 @@ def process_video():
                 latest_jpeg = jpeg.tobytes()
                 frame_condition.notify_all()
 
-        # To keep it close to 30fps and not spin out of control
-        time.sleep(1.0 / fps)
+        # Calculate time taken and skip frames to maintain real-time 1x speed
+        processing_time = time.time() - t0
+        expected_time = 1.0 / fps
+        
+        if processing_time > expected_time:
+            # YOLO tracking was slow. Skip frames to catch up to real-time.
+            frames_to_skip = int(processing_time / expected_time)
+            # Limit skipping to prevent freezing on massive lag spikes
+            frames_to_skip = min(frames_to_skip, int(fps * 2))
+            
+            for _ in range(frames_to_skip):
+                try:
+                    ret_skip, _ = current_cap.read()
+                    if not ret_skip:
+                        break
+                except Exception:
+                    break
+        else:
+            # We processed faster than real-time. Sleep to maintain original FPS.
+            time.sleep(expected_time - processing_time)
 
 @app.route('/video_feed')
 def video_feed():
@@ -306,6 +345,55 @@ def set_target():
         is_paused = False
         
     return jsonify({"status": "searching"})
+
+@app.route('/switch_camera', methods=['POST'])
+def switch_camera():
+    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps
+    
+    data = request.json
+    if not data or 'video_path' not in data or 'camera_id' not in data:
+        return jsonify({"error": "Invalid request"}), 400
+        
+    video_path_rel = data['video_path']
+    new_camera_id = data['camera_id']
+    
+    import os
+    video_path = os.path.abspath(video_path_rel)
+    
+    with state_lock:
+        print(f"\n[VISION] Switching camera to {new_camera_id}: {video_path}")
+        
+        new_cap = cv2.VideoCapture(video_path)
+        if not new_cap.isOpened():
+            print(f"[WARNING] Failed to open {video_path}. Switching to NO SIGNAL mode.", file=sys.stderr)
+            new_cap = None
+            
+        if cap is not None:
+            cap.release()
+            
+        cap = new_cap
+        
+        if cap is not None:
+            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        else:
+            frame_width = 1280
+            frame_height = 720
+            fps = 10.0
+            
+        camera_id_global = new_camera_id
+        
+        # Reset tracking state
+        target_roi = None
+        roi_search_frames = 0
+        target_track_id = None
+        target_plate = None
+        target_class = "VEHICLE"
+        consecutive_misses = 0
+        is_paused = False
+        
+    return jsonify({"status": "switched", "camera_id": new_camera_id})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CitiSentry Flask Vision Node")

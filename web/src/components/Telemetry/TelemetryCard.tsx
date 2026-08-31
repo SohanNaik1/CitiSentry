@@ -6,7 +6,7 @@ export default function TelemetryCard({ event }: { event: TelemetryEvent }) {
   const confColor = conf >= 0.85 ? 'text-emerald-online' : 'text-amber-suspect';
 
   return (
-    <div className="border border-slate-700 bg-tactical-dark/50 p-3 rounded mb-3 shadow-[0_0_10px_rgba(0,0,0,0.3)]">
+    <div className="border border-slate-700 bg-tactical-dark/50 p-3 rounded mb-3">
       <div className="flex justify-between items-start mb-2">
         <div className="font-mono text-cyan-telemetry text-lg font-bold tracking-widest border border-cyan-telemetry/30 px-2 py-1 bg-cyan-telemetry/10 rounded">
           {event.license_plate.text}

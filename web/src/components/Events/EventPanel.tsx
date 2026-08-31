@@ -6,10 +6,10 @@ import { useTelemetryStore } from '../../stores/useTelemetryStore';
 type Tab = 'telemetry' | 'alerts';
 
 const STATUS_COLORS: Record<string, string> = {
-  HOTLIST_HIT: 'text-crimson-alert',
-  CLONED_PLATE_SPOOF: 'text-crimson-alert',
-  SPEED_VIOLATION: 'text-amber-suspect',
-  BLIND_SPOT_DEVIATION: 'text-amber-suspect',
+  HOTLIST_HIT: 'text-red-600 dark:text-crimson-alert',
+  CLONED_PLATE_SPOOF: 'text-red-600 dark:text-crimson-alert',
+  SPEED_VIOLATION: 'text-amber-600 dark:text-amber-suspect',
+  BLIND_SPOT_DEVIATION: 'text-amber-600 dark:text-amber-suspect',
 };
 
 export default function EventPanel() {
@@ -18,32 +18,28 @@ export default function EventPanel() {
   const alerts = useTelemetryStore((state) => state.alerts);
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+    <div className="flex flex-col h-full bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg overflow-hidden transition-colors">
       {/* Tab Header */}
-      <div className="flex items-center border-b border-zinc-800 shrink-0 bg-zinc-950">
+      <div className="flex items-center border-b border-slate-200 dark:border-zinc-800 shrink-0 bg-slate-50 dark:bg-zinc-950 transition-colors">
         {(['telemetry', 'alerts'] as Tab[]).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-r border-zinc-800 transition-colors ${
+            className={`px-5 py-3 text-sm font-semibold uppercase tracking-wider border-r border-slate-200 dark:border-zinc-800 transition-colors ${
               activeTab === tab
                 ? tab === 'alerts'
-                  ? 'bg-zinc-900 text-crimson-alert border-b-2 border-b-crimson-alert'
-                  : 'bg-zinc-900 text-cyan-telemetry border-b-2 border-b-cyan-telemetry'
-                : 'text-zinc-500 hover:text-zinc-300 bg-transparent'
+                  ? 'bg-white dark:bg-zinc-900 text-red-600 dark:text-crimson-alert border-b-2 border-b-red-600 dark:border-b-crimson-alert'
+                  : 'bg-white dark:bg-zinc-900 text-cyan-700 dark:text-cyan-telemetry border-b-2 border-b-cyan-700 dark:border-b-cyan-telemetry'
+                : 'text-slate-500 dark:text-zinc-500 hover:text-slate-700 dark:hover:text-zinc-300 bg-transparent'
             }`}
           >
             {tab === 'telemetry' ? (
-              <span className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-telemetry animate-ping inline-block"></span>
-                Live Telemetry
-              </span>
+              <span>Live Telemetry</span>
             ) : (
-              <span className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-crimson-alert inline-block"></span>
+              <span className="flex items-center gap-2">
                 Critical Alerts
                 {alerts.length > 0 && (
-                  <span className="ml-1 bg-crimson-alert text-white rounded-full text-[9px] px-1.5 py-0.5">
+                  <span className="bg-red-600 dark:bg-crimson-alert text-white rounded-full text-xs px-2 py-0.5">
                     {alerts.length}
                   </span>
                 )}
@@ -54,9 +50,9 @@ export default function EventPanel() {
       </div>
 
       {/* Column Headers */}
-      <div className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-3 py-1.5 bg-zinc-950/60 border-b border-zinc-800 shrink-0">
+      <div className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-4 py-2 bg-slate-50/60 dark:bg-zinc-950/60 border-b border-slate-200 dark:border-zinc-800 shrink-0 transition-colors">
         {['TIMESTAMP', 'NODE', 'PLATE', 'SPEED', 'STATUS'].map((h) => (
-          <span key={h} className="font-mono text-[9px] text-zinc-600 tracking-widest uppercase">{h}</span>
+          <span key={h} className="text-xs text-slate-500 dark:text-zinc-600 tracking-wider uppercase font-semibold">{h}</span>
         ))}
       </div>
 
@@ -68,18 +64,18 @@ export default function EventPanel() {
           ) : (
             telemetryLogs.map((log, i) => {
               const conf = log.license_plate.confidence;
-              const statusColor = conf >= 0.85 ? 'text-emerald-online' : 'text-amber-suspect';
+              const statusColor = conf >= 0.85 ? 'text-emerald-600 dark:text-emerald-online' : 'text-amber-600 dark:text-amber-suspect';
               const statusLabel = conf >= 0.85 ? 'CLEAN' : 'SUSPECT';
               return (
                 <div
                   key={`${log.event_id}-${i}`}
-                  className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-3 py-2 border-b border-zinc-800/50 hover:bg-zinc-800/40 transition-colors"
+                  className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
                 >
-                  <span className="font-mono text-[10px] text-zinc-500">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                  <span className="font-mono text-[10px] text-zinc-400">{log.camera_id}</span>
-                  <span className="font-mono text-[10px] text-cyan-telemetry font-semibold">{log.license_plate.text}</span>
-                  <span className="font-mono text-[10px] text-amber-suspect">{log.speed_kmh} km/h</span>
-                  <span className={`font-mono text-[10px] font-semibold ${statusColor}`}>{statusLabel}</span>
+                  <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                  <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium">{log.camera_id}</span>
+                  <span className="text-sm text-cyan-700 dark:text-cyan-telemetry font-bold tracking-wider">{log.license_plate.text}</span>
+                  <span className="text-sm text-amber-600 dark:text-amber-suspect font-medium">{log.speed_kmh} km/h</span>
+                  <span className={`text-sm font-bold ${statusColor}`}>{statusLabel}</span>
                 </div>
               );
             })
@@ -90,13 +86,13 @@ export default function EventPanel() {
           alerts.map((alert, i) => (
             <div
               key={`${alert.alert_id}-${i}`}
-              className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-3 py-2 border-b border-zinc-800/50 hover:bg-zinc-800/40 transition-colors"
+              className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
             >
-              <span className="font-mono text-[10px] text-zinc-500">{new Date(alert.created_at).toLocaleTimeString()}</span>
-              <span className="font-mono text-[10px] text-zinc-400">{alert.source_camera_id}</span>
-              <span className="font-mono text-[10px] text-crimson-alert font-semibold">{alert.target_plate}</span>
-              <span className="font-mono text-[10px] text-zinc-500">—</span>
-              <span className={`font-mono text-[10px] font-semibold ${STATUS_COLORS[alert.alert_type] ?? 'text-zinc-400'}`}>
+              <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">{new Date(alert.created_at).toLocaleTimeString()}</span>
+              <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium">{alert.source_camera_id}</span>
+              <span className="text-sm text-red-600 dark:text-crimson-alert font-bold tracking-wider">{alert.target_plate}</span>
+              <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">—</span>
+              <span className={`text-sm font-bold ${STATUS_COLORS[alert.alert_type] ?? 'text-slate-400 dark:text-zinc-400'}`}>
                 {alert.severity}
               </span>
             </div>
@@ -110,7 +106,7 @@ export default function EventPanel() {
 function EmptyState({ label }: { label: string }) {
   return (
     <div className="h-full flex items-center justify-center">
-      <span className="text-[10px] text-zinc-600 font-mono tracking-widest animate-pulse">{label}</span>
+      <span className="text-sm text-slate-400 dark:text-zinc-600 tracking-wider animate-pulse font-medium">{label}</span>
     </div>
   );
 }

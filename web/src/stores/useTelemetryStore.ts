@@ -7,6 +7,7 @@ interface TelemetryState {
   telemetryLogs: TelemetryEvent[];
   alerts: AlertEvent[];
   trackedPlate: string | null;
+  trackAttempt: number;
   
   setActiveCamera: (id: string) => void;
   setActiveTarget: (target: TelemetryEvent | null) => void;
@@ -39,7 +40,7 @@ export const useTelemetryStore = create<TelemetryState>()((set) => ({
 
   addTelemetryEvent: (event: TelemetryEvent) => 
     set((state) => {
-      const existingIdx = state.telemetryLogs.findIndex(l => l.license_plate.plate === event.license_plate.plate);
+      const existingIdx = state.telemetryLogs.findIndex(l => l.license_plate.text === event.license_plate.text);
       if (existingIdx !== -1) {
         const newLogs = [...state.telemetryLogs];
         newLogs[existingIdx] = event; // Overwrite to prevent spam
