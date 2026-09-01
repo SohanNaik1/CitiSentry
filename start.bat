@@ -12,9 +12,7 @@ cd ..\..
 :: 2. Start Python Edge Vision Node (Port 5000)
 echo [CitiSentry] Starting Edge Vision Node (Python) on port 5000...
 cd services\edge-vision
-call ..\..\.venv\Scripts\activate.bat
-start /b python vision_node.py --video ..\..\web\public\videos\cam001.mp4 --camera_id CAM-001
-call deactivate
+start /b ..\..\.venv\Scripts\python.exe vision_node.py --video ..\..\web\public\videos\cam001.mp4 --camera_id CAM-001
 cd ..\..
 
 :: 3. Start Next.js Web Dashboard (Port 3000)

@@ -70,7 +70,7 @@ export default function MapContent() {
       zoomControl={false}
     >
       <TileLayer
-        url={`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=${process.env.NEXT_PUBLIC_CARTO_API_KEY}`}
+        url={`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_2hnp_1_939456ea1a6f1ca94af2c299`}
         attribution='&copy; <a href="https://carto.com/">CARTO</a>'
         maxZoom={19}
       />
