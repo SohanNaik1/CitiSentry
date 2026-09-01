@@ -7,7 +7,10 @@ import time
 import uuid
 
 import cv2
+import numpy as np
 import requests
+import easyocr
+import re
 from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 from ultralytics import YOLO
@@ -16,6 +19,15 @@ app = Flask(__name__)
 CORS(app)
 
 BROKER_URL = "http://localhost:8080/api/v1/telemetry"
+
+print("[VISION] Initializing EasyOCR model (GPU)...")
+try:
+    ocr_reader = easyocr.Reader(['en'], gpu=True)
+except Exception as e:
+    print(f"[ERROR] Failed to initialize EasyOCR: {e}", file=sys.stderr)
+    ocr_reader = None
+
+PLATE_REGEX = re.compile(r'^[A-Z0-9]{6,8}$')
 
 # Global state
 state_lock = threading.Lock()
@@ -28,6 +40,9 @@ camera_id_global = "CAM-001"
 target_plate = None
 target_track_id = None
 target_class = "VEHICLE"
+locked_plate = None
+locked_class = "UNKNOWN"
+locked_color = "UNKNOWN"
 consecutive_misses = 0
 MAX_CONSECUTIVE_MISSES = 90
 dispatch_count = 0
@@ -60,8 +75,55 @@ def compute_iou(box_a: list[float], box_b: list[float]) -> float:
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
 
+def map_yolo_class(yolo_class: str) -> str:
+    yolo_class = yolo_class.lower()
+    if yolo_class in ["car", "automobile"]:
+        return "SEDAN"
+    elif yolo_class in ["truck", "pickup"]:
+        return "TRUCK"
+    elif yolo_class in ["bus", "van"]:
+        return "BUS"
+    elif yolo_class in ["motorcycle", "bike", "bicycle"]:
+        return "MOTORCYCLE"
+    return "SUV"
+
+def detect_dominant_color(img: np.ndarray) -> str:
+    if img is None or img.size == 0:
+        return "UNKNOWN"
+    try:
+        pixels = img.reshape((-1, 3))
+        pixels = np.float32(pixels)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+        K = 1
+        _, _, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        dominant_bgr = centers[0].astype(int)
+        
+        # Simple color classification based on BGR distance
+        colors = {
+            "BLACK": (0, 0, 0),
+            "WHITE": (255, 255, 255),
+            "RED": (0, 0, 255),
+            "GREEN": (0, 255, 0),
+            "BLUE": (255, 0, 0),
+            "YELLOW": (0, 255, 255),
+            "SILVER": (192, 192, 192),
+            "GRAY": (128, 128, 128)
+        }
+        
+        min_dist = float('inf')
+        best_color = "UNKNOWN"
+        for name, bgr in colors.items():
+            dist = sum((a - b) ** 2 for a, b in zip(dominant_bgr, bgr))
+            if dist < min_dist:
+                min_dist = dist
+                best_color = name
+                
+        return best_color
+    except Exception:
+        return "UNKNOWN"
+
 def process_video():
-    global cap, latest_jpeg, target_track_id, target_plate, target_class, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames
+    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames
     
     frame_count = 0
     SPEED_WINDOW = 15
@@ -198,6 +260,30 @@ def process_video():
                     speed_mps = pixel_speed / PIXELS_PER_METER
                     simulated_speed = speed_mps * 3.6
 
+                if locked_plate is None and ocr_reader is not None:
+                    # Crop bottom 50% for plate detection
+                    x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
+                    x2, y2 = int(tracked_xyxy[2]), int(tracked_xyxy[3])
+                    
+                    if y2 > y1 and x2 > x1:
+                        plate_crop = frame[y1 + (y2 - y1) // 2 : y2, x1 : x2]
+                        if plate_crop.size > 0:
+                            gray_crop = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+                            results_ocr = ocr_reader.readtext(gray_crop)
+                            
+                            for (bbox, text, prob) in results_ocr:
+                                cleaned_text = re.sub(r'[^A-Z0-9]', '', text.upper())
+                                if PLATE_REGEX.match(cleaned_text) and prob > 0.60:
+                                    locked_plate = cleaned_text
+                                    locked_class = map_yolo_class(target_class)
+                                    
+                                    # Extract color from full vehicle bounding box
+                                    veh_crop = frame[y1:y2, x1:x2]
+                                    locked_color = detect_dominant_color(veh_crop)
+                                    
+                                    print(f"\n[ANPR SUCCESS] Plate Locked: {locked_plate} | Class: {locked_class} | Color: {locked_color}")
+                                    break
+
                 now = datetime.datetime.now(datetime.timezone.utc)
                 video_time_sec = frame_count / fps
 
@@ -207,15 +293,15 @@ def process_video():
                     "timestamp": now.isoformat(),
                     "epoch_ms": int(now.timestamp() * 1000),
                     "license_plate": {
-                        "text": current_target_plate,
-                        "confidence": 0.98,
-                        "is_clean": True,
+                        "text": locked_plate if locked_plate else (current_target_plate if current_target_plate else "UNKNOWN"),
+                        "confidence": 0.98 if locked_plate else 0.0,
+                        "is_clean": True if locked_plate else False,
                     },
                     "bounding_box": [round(float(v), 4) for v in bbox_normalized],
                     "vehicle_attributes": {
-                        "type": target_class.upper(),
-                        "color": "UNKNOWN",
-                        "color_confidence": 0.0,
+                        "type": locked_class if locked_class != "UNKNOWN" else map_yolo_class(target_class),
+                        "color": locked_color,
+                        "color_confidence": 0.9 if locked_color != "UNKNOWN" else 0.0,
                     },
                     "speed_kmh": round(float(simulated_speed), 1),
                     "heading_degrees": 0.0,
@@ -248,6 +334,9 @@ def process_video():
                     with state_lock:
                         target_track_id = None
                         target_plate = None
+                        locked_plate = None
+                        locked_class = "UNKNOWN"
+                        locked_color = "UNKNOWN"
 
         ret, jpeg = cv2.imencode('.jpg', frame)
         if ret:
@@ -311,6 +400,9 @@ def reset_video():
         is_paused = False
         target_track_id = None
         target_plate = None
+        locked_plate = None
+        locked_class = "UNKNOWN"
+        locked_color = "UNKNOWN"
         if cap is not None:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     return jsonify({"status": "reset"})
@@ -340,6 +432,9 @@ def set_target():
         roi_search_frames = MAX_ROI_SEARCH_FRAMES
         target_track_id = None
         target_plate = plate
+        locked_plate = None
+        locked_class = "UNKNOWN"
+        locked_color = "UNKNOWN"
         target_class = "VEHICLE"
         consecutive_misses = 0
         is_paused = False
@@ -389,6 +484,9 @@ def switch_camera():
         roi_search_frames = 0
         target_track_id = None
         target_plate = None
+        locked_plate = None
+        locked_class = "UNKNOWN"
+        locked_color = "UNKNOWN"
         target_class = "VEHICLE"
         consecutive_misses = 0
         is_paused = False
