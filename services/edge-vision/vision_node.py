@@ -27,7 +27,7 @@ except Exception as e:
     print(f"[ERROR] Failed to initialize EasyOCR: {e}", file=sys.stderr)
     ocr_reader = None
 
-PLATE_REGEX = re.compile(r'^[A-Z0-9]{6,8}$')
+PLATE_REGEX = re.compile(r'^[A-Z0-9]{4,10}$')
 
 # Global state
 state_lock = threading.Lock()
@@ -42,11 +42,12 @@ target_track_id = None
 target_class = "VEHICLE"
 locked_plate = None
 locked_class = "UNKNOWN"
-locked_color = "UNKNOWN"
+locked_color = "OTHER"
 consecutive_misses = 0
 MAX_CONSECUTIVE_MISSES = 90
 dispatch_count = 0
 is_paused = False
+smoothed_speed = 0.0
 
 target_roi = None
 roi_search_frames = 0
@@ -103,15 +104,13 @@ def detect_dominant_color(img: np.ndarray) -> str:
             "BLACK": (0, 0, 0),
             "WHITE": (255, 255, 255),
             "RED": (0, 0, 255),
-            "GREEN": (0, 255, 0),
             "BLUE": (255, 0, 0),
-            "YELLOW": (0, 255, 255),
             "SILVER": (192, 192, 192),
-            "GRAY": (128, 128, 128)
+            "GREY": (128, 128, 128)
         }
         
         min_dist = float('inf')
-        best_color = "UNKNOWN"
+        best_color = "OTHER"
         for name, bgr in colors.items():
             dist = sum((a - b) ** 2 for a, b in zip(dominant_bgr, bgr))
             if dist < min_dist:
@@ -120,10 +119,10 @@ def detect_dominant_color(img: np.ndarray) -> str:
                 
         return best_color
     except Exception:
-        return "UNKNOWN"
+        return "OTHER"
 
 def process_video():
-    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames
+    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed
     
     frame_count = 0
     SPEED_WINDOW = 15
@@ -259,21 +258,29 @@ def process_video():
                     PIXELS_PER_METER = 25.0
                     speed_mps = pixel_speed / PIXELS_PER_METER
                     simulated_speed = speed_mps * 3.6
+                    
+                    if smoothed_speed == 0.0:
+                        smoothed_speed = simulated_speed
+                    else:
+                        smoothed_speed = smoothed_speed * 0.85 + simulated_speed * 0.15
+                    
+                    simulated_speed = smoothed_speed
 
                 if locked_plate is None and ocr_reader is not None:
-                    # Crop bottom 50% for plate detection
+                    # Crop bottom 60% for plate detection
                     x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
                     x2, y2 = int(tracked_xyxy[2]), int(tracked_xyxy[3])
                     
                     if y2 > y1 and x2 > x1:
-                        plate_crop = frame[y1 + (y2 - y1) // 2 : y2, x1 : x2]
-                        if plate_crop.size > 0:
+                        plate_crop = frame[y1 + int((y2 - y1) * 0.4) : y2, x1 : x2]
+                        if plate_crop.shape[0] > 10 and plate_crop.shape[1] > 10:
                             gray_crop = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+                            gray_crop = cv2.resize(gray_crop, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
                             results_ocr = ocr_reader.readtext(gray_crop)
                             
                             for (bbox, text, prob) in results_ocr:
                                 cleaned_text = re.sub(r'[^A-Z0-9]', '', text.upper())
-                                if PLATE_REGEX.match(cleaned_text) and prob > 0.60:
+                                if PLATE_REGEX.match(cleaned_text) and prob > 0.30:
                                     locked_plate = cleaned_text
                                     locked_class = map_yolo_class(target_class)
                                     
@@ -301,7 +308,7 @@ def process_video():
                     "vehicle_attributes": {
                         "type": locked_class if locked_class != "UNKNOWN" else map_yolo_class(target_class),
                         "color": locked_color,
-                        "color_confidence": 0.9 if locked_color != "UNKNOWN" else 0.0,
+                        "color_confidence": 0.9 if locked_color != "OTHER" else 0.0,
                     },
                     "speed_kmh": round(float(simulated_speed), 1),
                     "heading_degrees": 0.0,
@@ -336,7 +343,8 @@ def process_video():
                         target_plate = None
                         locked_plate = None
                         locked_class = "UNKNOWN"
-                        locked_color = "UNKNOWN"
+                        locked_color = "OTHER"
+                        smoothed_speed = 0.0
 
         ret, jpeg = cv2.imencode('.jpg', frame)
         if ret:
@@ -395,21 +403,22 @@ def pause_video():
 
 @app.route('/reset', methods=['POST'])
 def reset_video():
-    global is_paused, target_track_id, target_plate
+    global is_paused, target_track_id, target_plate, locked_plate, locked_class, locked_color, smoothed_speed
     with state_lock:
         is_paused = False
         target_track_id = None
         target_plate = None
         locked_plate = None
         locked_class = "UNKNOWN"
-        locked_color = "UNKNOWN"
+        locked_color = "OTHER"
+        smoothed_speed = 0.0
         if cap is not None:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     return jsonify({"status": "reset"})
 
 @app.route('/set_target', methods=['POST'])
 def set_target():
-    global target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames
+    global target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, locked_plate, locked_class, locked_color, smoothed_speed
     
     data = request.json
     if not data or 'plate' not in data or 'roi' not in data:
@@ -434,16 +443,17 @@ def set_target():
         target_plate = plate
         locked_plate = None
         locked_class = "UNKNOWN"
-        locked_color = "UNKNOWN"
+        locked_color = "OTHER"
         target_class = "VEHICLE"
         consecutive_misses = 0
         is_paused = False
+        smoothed_speed = 0.0
         
     return jsonify({"status": "searching"})
 
 @app.route('/switch_camera', methods=['POST'])
 def switch_camera():
-    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps
+    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed
     
     data = request.json
     if not data or 'video_path' not in data or 'camera_id' not in data:
@@ -486,10 +496,11 @@ def switch_camera():
         target_plate = None
         locked_plate = None
         locked_class = "UNKNOWN"
-        locked_color = "UNKNOWN"
+        locked_color = "OTHER"
         target_class = "VEHICLE"
         consecutive_misses = 0
         is_paused = False
+        smoothed_speed = 0.0
         
     return jsonify({"status": "switched", "camera_id": new_camera_id})
 
