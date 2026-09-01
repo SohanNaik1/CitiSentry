@@ -9,6 +9,7 @@ env/
 venv/
 __pycache__/
 *.pyc
+.agent/
 
 # IDEs and Editors
 .vscode/
@@ -61,7 +62,6 @@ desktop.ini
 $RECYCLE.BIN/
 
 # Video Files
-*.mp4
 *.mkv
 *.avi
 *.mov
