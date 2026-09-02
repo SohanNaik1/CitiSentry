@@ -1,6 +1,7 @@
 import argparse
 import collections
 import datetime
+import math
 import sys
 import threading
 import time
@@ -14,6 +15,10 @@ import re
 from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 from ultralytics import YOLO
+import torch
+import torchvision.models as models
+import torchvision.transforms as transforms
+import torch.nn.functional as F
 
 app = Flask(__name__)
 CORS(app)
@@ -27,7 +32,25 @@ except Exception as e:
     print(f"[ERROR] Failed to initialize EasyOCR: {e}", file=sys.stderr)
     ocr_reader = None
 
-PLATE_REGEX = re.compile(r'^[A-Z0-9]{4,10}$')
+PLATE_REGEX = re.compile(r'^(?!.*FEDEX)[A-Z0-9]{4,10}$')
+
+print("[VISION] Initializing Deep Re-ID Model (ResNet50)...")
+try:
+    reid_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    reid_model = models.resnet50(weights='DEFAULT').to(reid_device)
+    # Remove the classifier head to just get the raw embedding
+    reid_model.fc = torch.nn.Identity()
+    reid_model.eval()
+    
+    reid_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+except Exception as e:
+    print(f"[ERROR] Failed to init Re-ID model: {e}", file=sys.stderr)
+    reid_model = None
 
 # Global state
 state_lock = threading.Lock()
@@ -37,6 +60,13 @@ frame_height = 0
 fps = 30.0
 camera_id_global = "CAM-001"
 dvr_start_time = time.time()
+centroid_history = collections.deque(maxlen=15)
+prev_center = None
+
+embedding_db = {} # Maps system_id -> embedding (tensor)
+active_system_id = None
+active_embedding = None
+reid_matched = False
 
 target_plate = None
 target_track_id = None
@@ -130,12 +160,34 @@ def extract_dominant_color(frame: np.ndarray, bbox: list[float]) -> str:
     except Exception:
         return "UNKNOWN"
 
+def get_embedding(frame: np.ndarray, bbox: list[float]) -> torch.Tensor:
+    if reid_model is None:
+        return None
+    try:
+        x1, y1, x2, y2 = map(int, bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+        
+        if x2 <= x1 or y2 <= y1:
+            return None
+            
+        crop = frame[y1:y2, x1:x2]
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        input_tensor = reid_transform(crop_rgb).unsqueeze(0).to(reid_device)
+        
+        with torch.no_grad():
+            embedding = reid_model(input_tensor)
+            # L2 Normalize
+            embedding = F.normalize(embedding, p=2, dim=1)
+            return embedding
+    except Exception as e:
+        print(f"[ERROR] Embedding failed: {e}")
+        return None
+
 def process_video():
-    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed
+    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed, centroid_history, prev_center, active_system_id, reid_matched
     
     frame_count = 0
-    SPEED_WINDOW = 15
-    center_history = collections.deque(maxlen=SPEED_WINDOW)
 
     while True:
         if cap is None:
@@ -208,6 +260,7 @@ def process_video():
             if current_roi is not None:
                 found_id = None
                 found_class = "VEHICLE"
+                found_bbox = None
                 
                 if results[0].boxes is not None and results[0].boxes.id is not None:
                     boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
@@ -220,6 +273,7 @@ def process_video():
                         if iou > best_iou:
                             best_iou = iou
                             found_id = ids[i]
+                            found_bbox = boxes[i]
                             found_class = map_yolo_class(int(classes[i]))
                             found_color = extract_dominant_color(frame, boxes[i])
                             
@@ -238,6 +292,7 @@ def process_video():
                             if dist < min_dist and dist < max_allowed_dist:
                                 min_dist = dist
                                 found_id = ids[i]
+                                found_bbox = boxes[i]
                                 found_class = map_yolo_class(int(classes[i]))
                                 found_color = extract_dominant_color(frame, boxes[i])
                 
@@ -249,6 +304,37 @@ def process_video():
                         locked_color = found_color
                         target_roi = None
                         print(f"\n[VISION] LOCKED onto Track ID: {found_id}")
+                        
+                        # Extract Deep Embedding
+                        emb = get_embedding(frame, found_bbox)
+                        if emb is not None:
+                            active_embedding = emb
+                            
+                            best_sim = -1.0
+                            best_match_id = None
+                            
+                            # Compare with known embeddings
+                            for sys_id, saved_emb in embedding_db.items():
+                                sim = F.cosine_similarity(emb, saved_emb).item()
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_match_id = sys_id
+                                    
+                            if best_sim > 0.85:
+                                active_system_id = best_match_id
+                                reid_matched = True
+                                print(f"[VISION] Deep Re-ID Match! {best_sim:.3f} -> {active_system_id}")
+                            else:
+                                if active_system_id is None:
+                                    import uuid
+                                    active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
+                                embedding_db[active_system_id] = emb
+                                reid_matched = False
+                        else:
+                            if active_system_id is None:
+                                import uuid
+                                active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
+                            reid_matched = False
                     else:
                         roi_search_frames -= 1
                         if roi_search_frames <= 0:
@@ -277,60 +363,72 @@ def process_video():
                     min(float(frame_height), tracked_xyxy[3]) / frame_height,
                 ]
 
-                cx = (tracked_xyxy[0] + tracked_xyxy[2]) / 2.0
-                cy = (tracked_xyxy[1] + tracked_xyxy[3]) / 2.0
-                center_history.append((cx, cy))
-
-                simulated_speed = 0.0
-                if len(center_history) >= 2:
-                    dx = center_history[-1][0] - center_history[0][0]
-                    dy = center_history[-1][1] - center_history[0][1]
-                    displacement = (dx ** 2 + dy ** 2) ** 0.5
-                    dt = len(center_history) / fps
-                    pixel_speed = displacement / dt
-                    PIXELS_PER_METER = 25.0
-                    speed_mps = pixel_speed / PIXELS_PER_METER
-                    simulated_speed = speed_mps * 3.6
-                    
-                    if smoothed_speed == 0.0:
-                        smoothed_speed = simulated_speed
-                    else:
-                        smoothed_speed = smoothed_speed * 0.85 + simulated_speed * 0.15
-                    
-                    simulated_speed = smoothed_speed
+                x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
+                x2, y2 = int(tracked_xyxy[2]), int(tracked_xyxy[3])
+                w, h = max(1, x2 - x1), max(1, y2 - y1)
+                
+                cx = x1 + w / 2.0
+                cy = y1 + h / 2.0
+                
+                # Windowed Displacement Velocity Tracking
+                current_time = time.time()
+                # Use bottom-center of bounding box for stability (touches the road)
+                bcx = x1 + w / 2.0
+                bcy = y2
+                
+                centroid_history.append((bcx, bcy, current_time))
+                
+                if len(centroid_history) >= 15:
+                    old_cx, old_cy, old_time = centroid_history[0]
+                    dt = current_time - old_time
+                    if dt > 0:
+                        dist = math.hypot(bcx - old_cx, bcy - old_cy)
+                        
+                        # Tune this factor based on estimated pixels-per-meter for the camera angle
+                        pixels_per_meter = 15.0
+                        speed_mps = (dist / pixels_per_meter) / dt
+                        raw_speed_kmh = speed_mps * 3.6
+                        
+                        # Apply a low-pass filter and clamp
+                        raw_speed_kmh = max(0.0, min(120.0, raw_speed_kmh))
+                        smoothed_speed = (smoothed_speed * 0.7) + (raw_speed_kmh * 0.3) if smoothed_speed > 0 else raw_speed_kmh
 
                 if locked_plate is None and ocr_reader is not None:
-                    # Crop bottom 60% for plate detection
-                    x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
-                    x2, y2 = int(tracked_xyxy[2]), int(tracked_xyxy[3])
-                    
-                    if y2 > y1 and x2 > x1:
-                        plate_crop = frame[y1 + int((y2 - y1) * 0.4) : y2, x1 : x2]
-                        if plate_crop.shape[0] > 10 and plate_crop.shape[1] > 10:
-                            gray_crop = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-                            gray_crop = cv2.resize(gray_crop, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                            results_ocr = ocr_reader.readtext(gray_crop)
-                            
-                            for (bbox, text, prob) in results_ocr:
-                                cleaned_text = re.sub(r'[^A-Z0-9]', '', text.upper())
-                                if PLATE_REGEX.match(cleaned_text) and prob > 0.30:
-                                    locked_plate = cleaned_text
-                                    
-                                    print(f"\n[ANPR SUCCESS] Plate Locked: {locked_plate} | Class: {locked_class} | Color: {locked_color}")
-                                    break
+                    if frame_count % 15 == 0 and w > 120 and h > 120:
+                        # Crop bottom 60% for plate detection
+                        if y2 > y1 and x2 > x1:
+                            plate_crop = frame[y1 + int((y2 - y1) * 0.4) : y2, x1 : x2]
+                            if plate_crop.shape[0] > 10 and plate_crop.shape[1] > 10:
+                                gray_crop = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+                                gray_crop = cv2.resize(gray_crop, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                                results_ocr = ocr_reader.readtext(gray_crop)
+                                
+                                for (bbox, text, prob) in results_ocr:
+                                    cleaned_text = re.sub(r'[^A-Z0-9]', '', text.upper())
+                                    if PLATE_REGEX.match(cleaned_text) and prob > 0.30:
+                                        locked_plate = cleaned_text
+                                        
+                                        print(f"\n[ANPR SUCCESS] Plate Locked: {locked_plate} | Class: {locked_class} | Color: {locked_color}")
+                                        break
+
+                if active_system_id is None:
+                    import uuid
+                    active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
+                    reid_matched = False
 
                 now = datetime.datetime.now(datetime.timezone.utc)
                 video_time_sec = frame_count / fps
 
                 event = {
                     "event_id": str(uuid.uuid4()),
+                    "system_id": active_system_id,
                     "camera_id": camera_id_global,
                     "timestamp": now.isoformat(),
                     "epoch_ms": int(now.timestamp() * 1000),
                     "license_plate": {
-                        "text": locked_plate if locked_plate else (current_target_plate if current_target_plate else "UNKNOWN"),
-                        "confidence": 0.98 if locked_plate else 0.0,
-                        "is_clean": True if locked_plate else False,
+                        "text": locked_plate if locked_plate else "UNKNOWN",
+                        "confidence": 0.95 if locked_plate else 0.0,
+                        "is_clean": reid_matched
                     },
                     "bounding_box": [round(float(v), 4) for v in bbox_normalized],
                     "vehicle_attributes": {
@@ -338,24 +436,25 @@ def process_video():
                         "color": locked_color,
                         "color_confidence": 0.9 if locked_color != "OTHER" else 0.0,
                     },
-                    "speed_kmh": round(float(simulated_speed), 1),
+                    "speed_kmh": round(float(smoothed_speed), 1),
                     "heading_degrees": 0.0,
-                    "reid_embeddings": [0.0] * 128,
+                    "reid_embeddings": (active_embedding[0][:128].cpu().numpy().tolist()) if active_embedding is not None else ([0.0] * 128),
                     "video_time_sec": round(float(video_time_sec), 3),
                 }
 
                 try:
-                    requests.post(BROKER_URL, json=event, timeout=0.5)
-                    dispatch_count += 1
-                    sys.stdout.write(f"\r[VISION] Dispatch #{dispatch_count} | Speed: {simulated_speed:05.1f} km/h")
-                    sys.stdout.flush()
+                    r = requests.post(BROKER_URL, json=event, timeout=0.5)
+                    if r.status_code == 200:
+                        dispatch_count += 1
+                        sys.stdout.write(f"\r[VISION] Dispatch #{dispatch_count} | Speed: {smoothed_speed:05.1f} km/h")
+                        sys.stdout.flush()
                 except requests.RequestException:
                     pass  
 
                 x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
                 x2, y2 = int(tracked_xyxy[2]), int(tracked_xyxy[3])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"ID:{int(current_target_id)} {target_class} {simulated_speed:.0f}km/h"
+                label = f"ID:{int(current_target_id)} {target_class} {smoothed_speed:.0f}km/h"
                 cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
                 consecutive_misses += 1
@@ -373,6 +472,10 @@ def process_video():
                         locked_class = "UNKNOWN"
                         locked_color = "OTHER"
                         smoothed_speed = 0.0
+                        centroid_history.clear()
+                        prev_center = None
+                        active_system_id = None
+                        reid_matched = False
 
         ret, jpeg = cv2.imencode('.jpg', frame)
         if ret:
@@ -446,7 +549,7 @@ def reset_video():
 
 @app.route('/set_target', methods=['POST'])
 def set_target():
-    global target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, locked_plate, locked_class, locked_color, smoothed_speed
+    global target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, locked_plate, locked_class, locked_color, smoothed_speed, active_system_id
     
     data = request.json
     if not data or 'plate' not in data or 'roi' not in data:
@@ -454,6 +557,7 @@ def set_target():
         
     plate = data['plate']
     roi_norm = data['roi'] # [xmin, ymin, xmax, ymax] normalized
+    incoming_sys_id = data.get('system_id')
     
     user_xyxy = [
         roi_norm[0] * frame_width,
@@ -476,6 +580,7 @@ def set_target():
         consecutive_misses = 0
         is_paused = False
         smoothed_speed = 0.0
+        active_system_id = incoming_sys_id
         
     return jsonify({"status": "searching"})
 
@@ -541,6 +646,10 @@ def switch_camera():
         consecutive_misses = 0
         is_paused = False
         smoothed_speed = 0.0
+        centroid_history.clear()
+        prev_center = None
+        active_system_id = None
+        reid_matched = False
         
     return jsonify({"status": "switched", "camera_id": new_camera_id})
 

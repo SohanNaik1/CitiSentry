@@ -4,7 +4,7 @@ import { useTelemetryStore } from '../../stores/useTelemetryStore';
 
 function DataPill({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
-    <div className="bg-slate-50 dark:bg-zinc-950 border border-slate-200 dark:border-zinc-800 rounded-md p-3 transition-colors">
+    <div className="bg-slate-50 dark:bg-zinc-950 border border-slate-200 dark:border-zinc-800 rounded-md py-4 px-3 min-h-[88px] transition-colors flex flex-col items-center justify-center text-center h-full">
       <div className="text-xs font-semibold text-slate-500 dark:text-zinc-500 uppercase tracking-wider mb-1">{label}</div>
       <div className={`text-base font-bold tracking-wide ${accent ?? 'text-slate-700 dark:text-zinc-200'}`}>{value}</div>
     </div>
@@ -13,17 +13,22 @@ function DataPill({ label, value, accent }: { label: string; value: string; acce
 
 export default function TargetDetails() {
   const activeTarget = useTelemetryStore((state) => state.activeTarget);
+  const activeSystemId = useTelemetryStore((state) => state.activeSystemId);
 
   // Always render the full grid; populate with dashes if no target
-  const plate = activeTarget?.license_plate.text ?? 'AWAITING TARGET';
+  const plateText = !activeTarget || activeTarget.license_plate.text === "UNKNOWN" ? "UNKNOWN" : activeTarget.license_plate.text;
+  const plateAccent = activeTarget && activeTarget.license_plate.text !== "UNKNOWN" 
+    ? 'text-emerald-500 dark:text-emerald-500' 
+    : 'text-slate-400 dark:text-zinc-500';
+
   const conf = activeTarget ? `${(activeTarget.license_plate.confidence * 100).toFixed(1)}%` : '—';
   const vehicleClass = activeTarget?.vehicle_attributes.type ?? '—';
   const color = activeTarget?.vehicle_attributes.color ?? '—';
   const speed = activeTarget ? `${activeTarget.speed_kmh} km/h` : '—';
   const reid = activeTarget
     ? activeTarget.license_plate.is_clean
-      ? 'VERIFIED'
-      : 'MISMATCH'
+      ? 'MATCHED'
+      : 'PENDING'
     : '—';
 
   const confAccent =
@@ -45,11 +50,18 @@ export default function TargetDetails() {
       {/* Large plate display */}
       <div className="flex items-center justify-between mt-1">
         <div>
-          <div className="text-xs font-semibold text-slate-500 dark:text-zinc-500 tracking-widest mb-1">LOCKED PLATE</div>
-          <div
-            className={`font-black tracking-widest ${activeTarget ? 'text-4xl text-cyan-700 dark:text-cyan-telemetry' : 'text-xl text-slate-300 dark:text-zinc-700'}`}
-          >
-            {plate}
+          <div className="text-xs font-semibold text-slate-500 dark:text-zinc-500 tracking-widest mb-1">TARGET PROFILE</div>
+          <div className="flex items-baseline gap-3">
+            <div
+              className={`font-black tracking-widest ${activeSystemId ? 'text-4xl text-cyan-700 dark:text-cyan-telemetry' : 'text-xl text-slate-300 dark:text-zinc-700'}`}
+            >
+              {activeSystemId ?? 'AWAITING TARGET'}
+            </div>
+            {activeTarget && activeTarget.vehicle_attributes.type !== "UNKNOWN" && (
+              <div className="text-lg font-bold text-slate-400 dark:text-zinc-400 tracking-wider">
+                {activeTarget.vehicle_attributes.color} {activeTarget.vehicle_attributes.type}
+              </div>
+            )}
           </div>
         </div>
         {activeTarget && (
@@ -60,8 +72,9 @@ export default function TargetDetails() {
         )}
       </div>
 
-      {/* 5-pill grid */}
-      <div className="grid grid-cols-5 gap-3 mt-auto mb-1">
+      {/* 6-pill grid */}
+      <div className="grid grid-cols-6 gap-3 mt-auto mb-1">
+        <DataPill label="License Plate" value={plateText} accent={plateAccent} />
         <DataPill label="Confidence" value={conf} accent={confAccent} />
         <DataPill label="Class" value={vehicleClass} />
         <DataPill label="Color" value={color} />

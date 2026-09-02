@@ -50,8 +50,8 @@ export default function EventPanel() {
       </div>
 
       {/* Column Headers */}
-      <div className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-4 py-2 bg-slate-50/60 dark:bg-zinc-950/60 border-b border-slate-200 dark:border-zinc-800 shrink-0 transition-colors">
-        {['TIMESTAMP', 'NODE', 'PLATE', 'SPEED', 'STATUS'].map((h) => (
+      <div className="grid grid-cols-[120px_80px_1fr_100px_80px_120px] gap-2 px-4 py-2 bg-slate-50/60 dark:bg-zinc-950/60 border-b border-slate-200 dark:border-zinc-800 shrink-0 transition-colors">
+        {['TIMESTAMP', 'NODE', 'PLATE', 'TARGET ID', 'SPEED', 'STATUS'].map((h) => (
           <span key={h} className="text-xs text-slate-500 dark:text-zinc-600 tracking-wider uppercase font-semibold">{h}</span>
         ))}
       </div>
@@ -69,11 +69,12 @@ export default function EventPanel() {
               return (
                 <div
                   key={`${log.event_id}-${i}`}
-                  className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
+                  className="grid grid-cols-[120px_80px_1fr_100px_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
                 >
                   <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">{new Date(log.timestamp).toLocaleTimeString()}</span>
                   <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium">{log.camera_id}</span>
                   <span className="text-sm text-cyan-700 dark:text-cyan-telemetry font-bold tracking-wider">{log.license_plate.text}</span>
+                  <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium tracking-wider">{log.system_id || '—'}</span>
                   <span className="text-sm text-amber-600 dark:text-amber-suspect font-medium">{log.speed_kmh} km/h</span>
                   <span className={`text-sm font-bold ${statusColor}`}>{statusLabel}</span>
                 </div>
@@ -86,11 +87,12 @@ export default function EventPanel() {
           alerts.map((alert, i) => (
             <div
               key={`${alert.alert_id}-${i}`}
-              className="grid grid-cols-[120px_80px_1fr_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
+              className="grid grid-cols-[120px_80px_1fr_100px_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
             >
               <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">{new Date(alert.created_at).toLocaleTimeString()}</span>
               <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium">{alert.source_camera_id}</span>
               <span className="text-sm text-red-600 dark:text-crimson-alert font-bold tracking-wider">{alert.target_plate}</span>
+              <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">—</span>
               <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">—</span>
               <span className={`text-sm font-bold ${STATUS_COLORS[alert.alert_type] ?? 'text-slate-400 dark:text-zinc-400'}`}>
                 {alert.severity}

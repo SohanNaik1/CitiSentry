@@ -5,11 +5,14 @@ import (
 	"citisentry-broker/internal/store"
 	"citisentry-broker/internal/ws"
 	"citisentry-broker/pkg/models"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"crypto/rand"
+	"strings"
 )
 
 // APIHandler holds references to shared application state and provides
@@ -24,6 +27,34 @@ type APIHandler struct {
 // WebSocket Hub, and SpatialRegistry for real-time anomaly detection.
 func NewAPIHandler(s *store.TelemetryStore, hub *ws.Hub, registry *engine.SpatialRegistry) *APIHandler {
 	return &APIHandler{Store: s, Hub: hub, Registry: registry}
+}
+
+// StartTracking handles POST /api/v1/track/start.
+// It generates a short, random alphanumeric ID (e.g. TRK-4F8A) to serve as the
+// primary identifier for a tracked vehicle.
+func (h *APIHandler) StartTracking(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	bytes := make([]byte, 2)
+	if _, err := rand.Read(bytes); err != nil {
+		http.Error(w, `{"error":"failed to generate id"}`, http.StatusInternalServerError)
+		return
+	}
+	systemID := "TRK-" + strings.ToUpper(hex.EncodeToString(bytes))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	resp := map[string]string{
+		"status":    "started",
+		"system_id": systemID,
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("[ERROR] Failed to encode response: %v", err)
+	}
 }
 
 // IngestTelemetry handles POST /api/v1/telemetry.

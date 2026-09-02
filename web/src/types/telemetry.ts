@@ -15,13 +15,14 @@ export interface LicensePlate {
 }
 
 export interface VehicleAttributes {
-  type: "SEDAN" | "SUV" | "HATCHBACK" | "TRUCK" | "BUS" | "MOTORCYCLE";
-  color: "WHITE" | "BLACK" | "SILVER" | "GREY" | "RED" | "BLUE" | "OTHER";
+  type: "SEDAN" | "SUV" | "HATCHBACK" | "TRUCK" | "BUS" | "MOTORCYCLE" | "UNKNOWN" | "VEHICLE";
+  color: "WHITE" | "BLACK" | "SILVER" | "GREY" | "RED" | "BLUE" | "OTHER" | "UNKNOWN";
   color_confidence: number;
 }
 
 export interface TelemetryEvent {
   event_id: string;
+  system_id: string;
   camera_id: string;
   timestamp: string;
   epoch_ms: number;

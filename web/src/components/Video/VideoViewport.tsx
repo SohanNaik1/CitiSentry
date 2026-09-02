@@ -95,6 +95,16 @@ export default function VideoViewport() {
     const ymax = Math.max(0, Math.min(1, ymaxRaw / renderedH));
 
     try {
+      // 1. Get system ID from Go Broker
+      const brokerRes = await fetch('http://localhost:8080/api/v1/track/start', {
+        method: 'POST',
+      });
+      const brokerData = await brokerRes.json();
+      
+      // 2. Save activeSystemId to store
+      useTelemetryStore.getState().setActiveSystemId(brokerData.system_id);
+
+      // 3. Start tracking on vision node
       await fetch('http://localhost:5000/set_target', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

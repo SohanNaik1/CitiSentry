@@ -8,8 +8,15 @@ export default function TelemetryCard({ event }: { event: TelemetryEvent }) {
   return (
     <div className="border border-slate-700 bg-tactical-dark/50 p-3 rounded mb-3">
       <div className="flex justify-between items-start mb-2">
-        <div className="font-mono text-cyan-telemetry text-lg font-bold tracking-widest border border-cyan-telemetry/30 px-2 py-1 bg-cyan-telemetry/10 rounded">
-          {event.license_plate.text}
+        <div className="flex flex-col gap-1">
+          <div className="font-mono text-cyan-telemetry text-lg font-bold tracking-widest border border-cyan-telemetry/30 px-2 py-1 bg-cyan-telemetry/10 rounded w-fit">
+            {event.license_plate.text}
+          </div>
+          {event.system_id && (
+            <div className="text-[10px] text-slate-400 font-mono tracking-widest uppercase">
+              ID: {event.system_id}
+            </div>
+          )}
         </div>
         <div className="text-xs text-slate-500 font-mono text-right">
           <div>{timestamp}</div>

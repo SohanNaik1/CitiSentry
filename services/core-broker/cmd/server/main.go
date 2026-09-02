@@ -60,6 +60,7 @@ func main() {
 	v1.HandleFunc("/telemetry", handler.IngestTelemetry).Methods(http.MethodPost, http.MethodOptions)
 	v1.HandleFunc("/telemetry", handler.QueryTelemetry).Methods(http.MethodGet)
 	v1.HandleFunc("/health", handler.HealthCheck).Methods(http.MethodGet)
+	v1.HandleFunc("/track/start", handler.StartTracking).Methods(http.MethodPost, http.MethodOptions)
 
 	// WebSocket upgrade endpoint — frontend clients connect here for live telemetry
 	router.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {

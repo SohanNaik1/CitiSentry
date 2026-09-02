@@ -28,6 +28,7 @@ type VehicleAttributes struct {
 
 type TelemetryEvent struct {
 	EventID           string            `json:"event_id"`
+	SystemID          string            `json:"system_id"`
 	CameraID          string            `json:"camera_id"`
 	Timestamp         string            `json:"timestamp"`
 	EpochMS           int64             `json:"epoch_ms"`
