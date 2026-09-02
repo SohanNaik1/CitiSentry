@@ -40,18 +40,29 @@ export const useTelemetryStore = create<TelemetryState>()((set) => ({
 
   addTelemetryEvent: (event: TelemetryEvent) => 
     set((state) => {
+      let nextTrackedPlate = state.trackedPlate;
+      let nextActiveTarget = state.activeTarget;
+      
+      // If we initiated a track on an UNKNOWN plate and the backend locked it,
+      // or if it matches the plate we are currently tracking, update the target!
+      if (state.trackedPlate === "UNKNOWN" || state.trackedPlate === event.license_plate.text) {
+        nextTrackedPlate = event.license_plate.text;
+        nextActiveTarget = event;
+      }
+
       const existingIdx = state.telemetryLogs.findIndex(l => l.license_plate.text === event.license_plate.text);
       if (existingIdx !== -1) {
         const newLogs = [...state.telemetryLogs];
         newLogs[existingIdx] = event; // Overwrite to prevent spam
-        return { telemetryLogs: newLogs };
+        return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate };
       }
+      
       // Keep max 100 events to prevent memory leaks
       const newLogs = [event, ...state.telemetryLogs];
       if (newLogs.length > 100) {
         newLogs.length = 100;
       }
-      return { telemetryLogs: newLogs };
+      return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate };
     }),
 
   addAlert: (alert: AlertEvent) =>

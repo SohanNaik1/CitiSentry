@@ -36,6 +36,7 @@ frame_width = 0
 frame_height = 0
 fps = 30.0
 camera_id_global = "CAM-001"
+dvr_start_time = time.time()
 
 target_plate = None
 target_track_id = None
@@ -76,50 +77,58 @@ def compute_iou(box_a: list[float], box_b: list[float]) -> float:
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
 
-def map_yolo_class(yolo_class: str) -> str:
-    yolo_class = yolo_class.lower()
-    if yolo_class in ["car", "automobile"]:
-        return "SEDAN"
-    elif yolo_class in ["truck", "pickup"]:
-        return "TRUCK"
-    elif yolo_class in ["bus", "van"]:
-        return "BUS"
-    elif yolo_class in ["motorcycle", "bike", "bicycle"]:
-        return "MOTORCYCLE"
-    return "SUV"
+YOLO_COCO_CLASSES = {
+    2: "SEDAN",
+    3: "MOTORCYCLE",
+    5: "BUS",
+    7: "TRUCK"
+}
 
-def detect_dominant_color(img: np.ndarray) -> str:
-    if img is None or img.size == 0:
-        return "UNKNOWN"
+def map_yolo_class(class_id: int) -> str:
+    return YOLO_COCO_CLASSES.get(class_id, "SUV")
+
+def extract_dominant_color(frame: np.ndarray, bbox: list[float]) -> str:
     try:
-        pixels = img.reshape((-1, 3))
-        pixels = np.float32(pixels)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        K = 1
-        _, _, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-        dominant_bgr = centers[0].astype(int)
+        x1, y1, x2, y2 = map(int, bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
         
-        # Simple color classification based on BGR distance
-        colors = {
-            "BLACK": (0, 0, 0),
-            "WHITE": (255, 255, 255),
-            "RED": (0, 0, 255),
-            "BLUE": (255, 0, 0),
-            "SILVER": (192, 192, 192),
-            "GREY": (128, 128, 128)
+        if x2 <= x1 or y2 <= y1:
+            return "UNKNOWN"
+            
+        crop = frame[y1:y2, x1:x2]
+        tiny = cv2.resize(crop, (32, 32))
+        hsv = cv2.cvtColor(tiny, cv2.COLOR_BGR2HSV)
+        
+        boundaries = {
+            "WHITE":  ([0, 0, 200], [180, 30, 255]),
+            "BLACK":  ([0, 0, 0], [180, 255, 50]),
+            "SILVER": ([0, 0, 50], [180, 40, 200]),
+            "RED":    ([0, 100, 100], [10, 255, 255]),
+            "BLUE":   ([100, 100, 50], [140, 255, 255]),
+            "YELLOW": ([20, 100, 100], [40, 255, 255])
         }
         
-        min_dist = float('inf')
-        best_color = "OTHER"
-        for name, bgr in colors.items():
-            dist = sum((a - b) ** 2 for a, b in zip(dominant_bgr, bgr))
-            if dist < min_dist:
-                min_dist = dist
-                best_color = name
+        max_count = 0
+        best_color = "UNKNOWN"
+        
+        for color, (lower, upper) in boundaries.items():
+            lower_np = np.array(lower, dtype=np.uint8)
+            upper_np = np.array(upper, dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower_np, upper_np)
+            count = cv2.countNonZero(mask)
+            
+            if color == "RED":
+                mask2 = cv2.inRange(hsv, np.array([160, 100, 100], dtype=np.uint8), np.array([180, 255, 255], dtype=np.uint8))
+                count += cv2.countNonZero(mask2)
                 
-        return best_color
+            if count > max_count:
+                max_count = count
+                best_color = color
+                
+        return best_color if max_count > 0 else "UNKNOWN"
     except Exception:
-        return "OTHER"
+        return "UNKNOWN"
 
 def process_video():
     global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed
@@ -164,12 +173,32 @@ def process_video():
             ret = False
             
         if not ret:
-            # Loop video for the demo
+            # Loop video maintaining Global DVR sync
             try:
-                current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                elapsed_sec = time.time() - dvr_start_time
+                total_frames = current_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                vid_fps = current_cap.get(cv2.CAP_PROP_FPS) or 30.0
+                if vid_fps <= 0:
+                    vid_fps = 30.0
+                    
+                if total_frames > 0:
+                    video_duration = total_frames / vid_fps
+                    seek_sec = elapsed_sec % video_duration
+                    current_cap.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
+                else:
+                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    
+                # Grab the valid frame after seeking
+                ret, frame = current_cap.read()
+                if not ret:
+                    # We are in a "dead zone" (calculated duration > actual frames).
+                    # Force reset to frame 0 immediately to prevent an infinite loop!
+                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = current_cap.read()
+                    if not ret:
+                        continue
             except Exception:
-                pass
-            continue
+                continue
             
         frame_count += 1
 
@@ -191,7 +220,8 @@ def process_video():
                         if iou > best_iou:
                             best_iou = iou
                             found_id = ids[i]
-                            found_class = model.names[int(classes[i])]
+                            found_class = map_yolo_class(int(classes[i]))
+                            found_color = extract_dominant_color(frame, boxes[i])
                             
                     if found_id is None:
                         user_cx = (current_roi[0] + current_roi[2]) / 2
@@ -208,12 +238,15 @@ def process_video():
                             if dist < min_dist and dist < max_allowed_dist:
                                 min_dist = dist
                                 found_id = ids[i]
-                                found_class = model.names[int(classes[i])]
+                                found_class = map_yolo_class(int(classes[i]))
+                                found_color = extract_dominant_color(frame, boxes[i])
                 
                 with state_lock:
                     if found_id is not None:
                         target_track_id = found_id
                         target_class = found_class
+                        locked_class = found_class
+                        locked_color = found_color
                         target_roi = None
                         print(f"\n[VISION] LOCKED onto Track ID: {found_id}")
                     else:
@@ -282,11 +315,6 @@ def process_video():
                                 cleaned_text = re.sub(r'[^A-Z0-9]', '', text.upper())
                                 if PLATE_REGEX.match(cleaned_text) and prob > 0.30:
                                     locked_plate = cleaned_text
-                                    locked_class = map_yolo_class(target_class)
-                                    
-                                    # Extract color from full vehicle bounding box
-                                    veh_crop = frame[y1:y2, x1:x2]
-                                    locked_color = detect_dominant_color(veh_crop)
                                     
                                     print(f"\n[ANPR SUCCESS] Plate Locked: {locked_plate} | Class: {locked_class} | Color: {locked_color}")
                                     break
@@ -453,7 +481,7 @@ def set_target():
 
 @app.route('/switch_camera', methods=['POST'])
 def switch_camera():
-    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed
+    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed, dvr_start_time
     
     data = request.json
     if not data or 'video_path' not in data or 'camera_id' not in data:
@@ -482,6 +510,18 @@ def switch_camera():
             frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            if fps <= 0:
+                fps = 30.0
+                
+            elapsed_sec = time.time() - dvr_start_time
+            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            
+            if total_frames > 0:
+                video_duration = total_frames / fps
+                seek_sec = elapsed_sec % video_duration
+                cap.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
+                print(f"[DVR SYNC] Seeked to {seek_sec:.2f}s (Modulo elapsed: {elapsed_sec:.2f}s)")
+                
         else:
             frame_width = 1280
             frame_height = 720

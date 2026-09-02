@@ -41,6 +41,9 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 120
+    },
+    "video_file": {
+      "type": "string"
     }
   }
 }

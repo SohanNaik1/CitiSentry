@@ -65,3 +65,7 @@ $RECYCLE.BIN/
 *.mkv
 *.avi
 *.mov
+
+# Allow tracking of specific video folders for Git LFS
+!web/public/videos/**/*.mp4
+!web/public/videos/**/*.avi

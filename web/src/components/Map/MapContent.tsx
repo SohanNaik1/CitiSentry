@@ -45,8 +45,13 @@ export default function MapContent() {
     setActiveCamera(node.camera_id);
     
     // Construct local path: e.g. CAM-002 -> cam002.mp4
-    const videoFileName = node.camera_id.toLowerCase().replace('-', '') + '.mp4';
-    const videoPath = `../../web/public/videos/${videoFileName}`;
+    let videoPath;
+    if (node.video_file) {
+      videoPath = `../../web/public/videos/${node.video_file}`;
+    } else {
+      const videoFileName = node.camera_id.toLowerCase().replace('-', '') + '.mp4';
+      videoPath = `../../web/public/videos/${videoFileName}`;
+    }
 
     try {
       await fetch('http://localhost:5000/switch_camera', {
@@ -62,10 +67,12 @@ export default function MapContent() {
     }
   };
 
+  // Create bounds that encapsulate all cameras
+  const bounds = L.latLngBounds(cameraNodes.map(node => [node.lat, node.lng] as [number, number]));
+
   return (
     <MapContainer 
-      center={[avgLat, avgLng]} 
-      zoom={13} 
+      bounds={bounds}
       className="w-full h-full bg-tactical-dark z-0"
       zoomControl={false}
     >

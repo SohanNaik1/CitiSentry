@@ -43,5 +43,255 @@
     "status": "ONLINE",
     "stream_url": "rtsp://citisentry.local/stream/cam005",
     "fps": 30
+  },
+  {
+    "camera_id": "CAM-016",
+    "name": "Iowa Intersection S04-c016",
+    "lat": 42.49928,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam016",
+    "fps": 10,
+    "video_file": "AICity22/S04/c016.avi"
+  },
+  {
+    "camera_id": "CAM-017",
+    "name": "Iowa Intersection S04-c017",
+    "lat": 42.499134,
+    "lng": -90.686039,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam017",
+    "fps": 10,
+    "video_file": "AICity22/S04/c017.avi"
+  },
+  {
+    "camera_id": "CAM-018",
+    "name": "Iowa Intersection S04-c018",
+    "lat": 42.49878,
+    "lng": -90.685893,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam018",
+    "fps": 10,
+    "video_file": "AICity22/S04/c018.avi"
+  },
+  {
+    "camera_id": "CAM-019",
+    "name": "Iowa Intersection S04-c019",
+    "lat": 42.498426,
+    "lng": -90.686039,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam019",
+    "fps": 10,
+    "video_file": "AICity22/S04/c019.avi"
+  },
+  {
+    "camera_id": "CAM-020",
+    "name": "Iowa Intersection S04-c020",
+    "lat": 42.49828,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam020",
+    "fps": 10,
+    "video_file": "AICity22/S04/c020.avi"
+  },
+  {
+    "camera_id": "CAM-021",
+    "name": "Iowa Intersection S04-c021",
+    "lat": 42.498426,
+    "lng": -90.686747,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam021",
+    "fps": 10,
+    "video_file": "AICity22/S04/c021.avi"
+  },
+  {
+    "camera_id": "CAM-022",
+    "name": "Iowa Intersection S04-c022",
+    "lat": 42.49878,
+    "lng": -90.686893,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam022",
+    "fps": 10,
+    "video_file": "AICity22/S04/c022.avi"
+  },
+  {
+    "camera_id": "CAM-023",
+    "name": "Iowa Intersection S04-c023",
+    "lat": 42.499134,
+    "lng": -90.686747,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam023",
+    "fps": 10,
+    "video_file": "AICity22/S04/c023.avi"
+  },
+  {
+    "camera_id": "CAM-024",
+    "name": "Iowa Intersection S04-c024",
+    "lat": 42.49978,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam024",
+    "fps": 10,
+    "video_file": "AICity22/S04/c024.avi"
+  },
+  {
+    "camera_id": "CAM-025",
+    "name": "Iowa Intersection S04-c025",
+    "lat": 42.499487,
+    "lng": -90.685686,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam025",
+    "fps": 10,
+    "video_file": "AICity22/S04/c025.avi"
+  },
+  {
+    "camera_id": "CAM-026",
+    "name": "Iowa Intersection S04-c026",
+    "lat": 42.49878,
+    "lng": -90.685393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam026",
+    "fps": 10,
+    "video_file": "AICity22/S04/c026.avi"
+  },
+  {
+    "camera_id": "CAM-027",
+    "name": "Iowa Intersection S04-c027",
+    "lat": 42.498073,
+    "lng": -90.685686,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam027",
+    "fps": 10,
+    "video_file": "AICity22/S04/c027.avi"
+  },
+  {
+    "camera_id": "CAM-028",
+    "name": "Iowa Intersection S04-c028",
+    "lat": 42.49778,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam028",
+    "fps": 10,
+    "video_file": "AICity22/S04/c028.avi"
+  },
+  {
+    "camera_id": "CAM-029",
+    "name": "Iowa Intersection S04-c029",
+    "lat": 42.498073,
+    "lng": -90.6871,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam029",
+    "fps": 10,
+    "video_file": "AICity22/S04/c029.avi"
+  },
+  {
+    "camera_id": "CAM-030",
+    "name": "Iowa Intersection S04-c030",
+    "lat": 42.49878,
+    "lng": -90.687393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam030",
+    "fps": 10,
+    "video_file": "AICity22/S04/c030.avi"
+  },
+  {
+    "camera_id": "CAM-031",
+    "name": "Iowa Intersection S04-c031",
+    "lat": 42.499487,
+    "lng": -90.6871,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam031",
+    "fps": 10,
+    "video_file": "AICity22/S04/c031.avi"
+  },
+  {
+    "camera_id": "CAM-032",
+    "name": "Iowa Intersection S04-c032",
+    "lat": 42.50028,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam032",
+    "fps": 10,
+    "video_file": "AICity22/S04/c032.avi"
+  },
+  {
+    "camera_id": "CAM-033",
+    "name": "Iowa Intersection S04-c033",
+    "lat": 42.499841,
+    "lng": -90.685332,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam033",
+    "fps": 10,
+    "video_file": "AICity22/S04/c033.avi"
+  },
+  {
+    "camera_id": "CAM-034",
+    "name": "Iowa Intersection S04-c034",
+    "lat": 42.49878,
+    "lng": -90.684893,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam034",
+    "fps": 10,
+    "video_file": "AICity22/S04/c034.avi"
+  },
+  {
+    "camera_id": "CAM-035",
+    "name": "Iowa Intersection S04-c035",
+    "lat": 42.497719,
+    "lng": -90.685332,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam035",
+    "fps": 10,
+    "video_file": "AICity22/S04/c035.avi"
+  },
+  {
+    "camera_id": "CAM-036",
+    "name": "Iowa Intersection S04-c036",
+    "lat": 42.49728,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam036",
+    "fps": 10,
+    "video_file": "AICity22/S04/c036.avi"
+  },
+  {
+    "camera_id": "CAM-037",
+    "name": "Iowa Intersection S04-c037",
+    "lat": 42.497719,
+    "lng": -90.687454,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam037",
+    "fps": 10,
+    "video_file": "AICity22/S04/c037.avi"
+  },
+  {
+    "camera_id": "CAM-038",
+    "name": "Iowa Intersection S04-c038",
+    "lat": 42.49878,
+    "lng": -90.687893,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam038",
+    "fps": 10,
+    "video_file": "AICity22/S04/c038.avi"
+  },
+  {
+    "camera_id": "CAM-039",
+    "name": "Iowa Intersection S04-c039",
+    "lat": 42.499841,
+    "lng": -90.687454,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam039",
+    "fps": 10,
+    "video_file": "AICity22/S04/c039.avi"
+  },
+  {
+    "camera_id": "CAM-040",
+    "name": "Iowa Intersection S04-c040",
+    "lat": 42.50078,
+    "lng": -90.686393,
+    "status": "ONLINE",
+    "stream_url": "rtsp://citisentry.local/stream/cam040",
+    "fps": 10,
+    "video_file": "AICity22/S04/c040.avi"
   }
 ]

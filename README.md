@@ -3,9 +3,17 @@
 CitiSentry is a computer vision and data processing system designed to track vehicles across a network of city cameras. It reads license plates, calculates vehicle speeds, and tracks movement on a live map in real time. 
 
 The software is divided into three main components working together:
-1. **Edge Vision (Python)**: Analyzes video feeds using AI to detect vehicles and read license plates.
-2. **Core Broker (Go)**: Acts as the central brain. It receives data from the cameras and routes it to the frontend.
+1. **Edge Vision (Python)**: Analyzes video feeds using AI (YOLOv8 + EasyOCR + OpenCV K-Means) to detect vehicles, read license plates, and extract visual attributes (Class and Color).
+2. **Core Broker (Go)**: Acts as the central brain. It receives data from the cameras and routes it to the frontend via WebSockets.
 3. **Web Dashboard (Next.js)**: The user interface where operators can view the live map, watch video feeds, and monitor alerts.
+
+---
+
+## Key Features
+- **Multi-Camera Tracking:** Features 30+ fully integrated camera streams, including the extensive **AICity22 Track1 MTMC Dataset** spanning an intersection in Iowa, USA.
+- **Global DVR Clock:** All video feeds are mathematically synchronized against a master timeline using modulo logic, enabling seamless multi-camera switching without losing context.
+- **Visual Re-ID Cache-and-Hold:** Heavily optimized attribute extraction (Vehicle Class and Color via HSV bounds) that calculates values instantly on target-lock and caches them in memory for zero-lag 1080p telemetry.
+- **Dead-Zone Recovery:** Built-in safeguards that instantly recover the video processing thread if OpenCV seeks into a corrupted or non-existent video frame.
 
 ---
 
