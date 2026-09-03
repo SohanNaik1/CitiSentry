@@ -78,8 +78,7 @@ Choose the option matching your hardware:
 #### Option A: For NVIDIA GPU Acceleration (Recommended for systems with dedicated NVIDIA GPUs)
 ```cmd
 python -m pip install --upgrade pip
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 
 #### Option B: For CPU Only (No Dedicated GPU)
@@ -119,7 +118,7 @@ source .venv/bin/activate
 pip install --upgrade pip
 
 # For NVIDIA GPU:
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 
 pip install -r requirements.txt
 ```

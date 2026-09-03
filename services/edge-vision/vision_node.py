@@ -61,6 +61,7 @@ MASTER_CYCLE_SEC: float = 71.0
 
 # Global state
 state_lock = threading.Lock()
+camera_lock = threading.RLock() # Protects cv2.VideoCapture calls
 cap = None
 frame_width = 0
 frame_height = 0
@@ -128,8 +129,9 @@ def get_video_duration(capture: cv2.VideoCapture) -> float:
 
     Falls back to 0.0 if metadata is unavailable.
     """
-    total_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
-    vid_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    with camera_lock:
+        total_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        vid_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     if vid_fps <= 0:
         vid_fps = 30.0
     if total_frames > 0:
@@ -323,29 +325,31 @@ def process_video():
         # Always seek to effective_t so that after camera switches,
         # end-of-feed gaps, or DVR scrubs, the video lands on the exact
         # correct frame.
-        if video_dur > 0.0:
-            current_pos_sec = current_cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-            drift = abs(current_pos_sec - effective_t)
-            # Only hard-seek if drift exceeds half a frame duration to
-            # avoid unnecessary seeks on every iteration
-            if drift > (0.5 / fps):
-                current_cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
-        
-        try:
-            ret, frame = current_cap.read()
-        except Exception:
-            ret = False
+        with camera_lock:
+            if video_dur > 0.0:
+                current_pos_sec = current_cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                drift = abs(current_pos_sec - effective_t)
+                # Only hard-seek if drift exceeds half a frame duration to
+                # avoid unnecessary seeks on every iteration
+                if drift > (0.5 / fps):
+                    current_cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
             
-        if not ret:
-            # The seek landed past the last decodable frame.
-            # Reset to frame 0 and try once more.
-            current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             try:
                 ret, frame = current_cap.read()
             except Exception:
                 ret = False
+                
             if not ret:
-                continue
+                # The seek landed past the last decodable frame.
+                # Reset to frame 0 and try once more.
+                current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                try:
+                    ret, frame = current_cap.read()
+                except Exception:
+                    ret = False
+        
+        if not ret:
+            continue
             
         frame_count += 1
 
@@ -362,34 +366,28 @@ def process_video():
                     ids = results[0].boxes.id.cpu().numpy().tolist()
                     classes = results[0].boxes.cls.cpu().numpy().tolist()
                     
-                    best_iou = 0.0
+                    user_cx = (current_roi[0] + current_roi[2]) / 2
+                    user_cy = (current_roi[1] + current_roi[3]) / 2
+                    user_diag = math.hypot(current_roi[2] - current_roi[0], current_roi[3] - current_roi[1]) + 1e-6
+                    
+                    best_score = -float('inf')
                     for i in range(len(boxes)):
-                        iou = compute_iou(current_roi, boxes[i])
-                        if iou > best_iou:
-                            best_iou = iou
-                            found_id = ids[i]
-                            found_bbox = boxes[i]
-                            found_class = map_yolo_class(int(classes[i]))
-                            found_color = extract_dominant_color(frame, boxes[i])
-                            
-                    if found_id is None:
-                        user_cx = (current_roi[0] + current_roi[2]) / 2
-                        user_cy = (current_roi[1] + current_roi[3]) / 2
-                        user_w = current_roi[2] - current_roi[0]
-                        user_h = current_roi[3] - current_roi[1]
-                        max_allowed_dist = max(user_w, user_h, 150) * 1.5
+                        box = boxes[i]
+                        cx = (box[0] + box[2]) / 2
+                        cy = (box[1] + box[3]) / 2
+                        dist = math.hypot(cx - user_cx, cy - user_cy)
                         
-                        min_dist = float("inf")
-                        for i in range(len(boxes)):
-                            cx = (boxes[i][0] + boxes[i][2]) / 2
-                            cy = (boxes[i][1] + boxes[i][3]) / 2
-                            dist = ((cx - user_cx) ** 2 + (cy - user_cy) ** 2) ** 0.5
-                            if dist < min_dist and dist < max_allowed_dist:
-                                min_dist = dist
-                                found_id = ids[i]
-                                found_bbox = boxes[i]
-                                found_class = map_yolo_class(int(classes[i]))
-                                found_color = extract_dominant_color(frame, boxes[i])
+                        norm_dist = dist / user_diag
+                        iou = compute_iou(current_roi, box)
+                        
+                        score = iou - (norm_dist * 1.5)
+                        
+                        if (iou > 0.0 or norm_dist < 1.0) and score > best_score:
+                            best_score = score
+                            found_id = ids[i]
+                            found_bbox = box
+                            found_class = map_yolo_class(int(classes[i]))
+                            found_color = extract_dominant_color(frame, box)
                 
                 with state_lock:
                     if found_id is not None:
@@ -588,13 +586,14 @@ def process_video():
             # Limit skipping to prevent freezing on massive lag spikes
             frames_to_skip = min(frames_to_skip, int(fps * 2))
             
-            for _ in range(frames_to_skip):
-                try:
-                    ret_skip, _ = current_cap.read()
-                    if not ret_skip:
+            with camera_lock:
+                for _ in range(frames_to_skip):
+                    try:
+                        ret_skip, _ = current_cap.read()
+                        if not ret_skip:
+                            break
+                    except Exception:
                         break
-                except Exception:
-                    break
         else:
             # We processed faster than real-time. Sleep to maintain original FPS.
             time.sleep(expected_time - processing_time)
@@ -638,8 +637,9 @@ def reset_video():
         locked_class = "UNKNOWN"
         locked_color = "OTHER"
         smoothed_speed = 0.0
-        if cap is not None:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        with camera_lock:
+            if cap is not None:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     return jsonify({"status": "reset"})
 
 @app.route('/set_target', methods=['POST'])
@@ -795,36 +795,37 @@ def switch_camera():
             print(f"[WARNING] Failed to open {video_path}. Switching to NO SIGNAL mode.", file=sys.stderr)
             new_cap = None
             
-        if cap is not None:
-            cap.release()
-            
-        cap = new_cap
-        
-        if cap is not None:
-            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            if fps <= 0:
-                fps = 30.0
+        with camera_lock:
+            if cap is not None:
+                cap.release()
                 
-            # ── Absolute Timeline Seek ──────────────────────────────
-            # Compute exactly where the master clock is right now and
-            # seek the new video to that position. If effective_time
-            # exceeds this video's duration, the process_video loop
-            # will render the "END OF FEED" black frame automatically.
-            effective_t = get_effective_time()
-            video_dur = get_video_duration(cap)
+            cap = new_cap
             
-            if video_dur > 0.0 and effective_t < video_dur:
-                cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
-                print(f"[DVR SYNC] Seeked to {effective_t:.2f}s / {video_dur:.2f}s (Master cycle: {MASTER_CYCLE_SEC:.1f}s)")
+            if cap is not None:
+                frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                if fps <= 0:
+                    fps = 30.0
+                    
+                # ── Absolute Timeline Seek ──────────────────────────────
+                # Compute exactly where the master clock is right now and
+                # seek the new video to that position. If effective_time
+                # exceeds this video's duration, the process_video loop
+                # will render the "END OF FEED" black frame automatically.
+                effective_t = get_effective_time()
+                video_dur = get_video_duration(cap)
+                
+                if video_dur > 0.0 and effective_t < video_dur:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
+                    print(f"[DVR SYNC] Seeked to {effective_t:.2f}s / {video_dur:.2f}s (Master cycle: {MASTER_CYCLE_SEC:.1f}s)")
+                else:
+                    print(f"[DVR SYNC] effective_t={effective_t:.2f}s > video_dur={video_dur:.2f}s — will show END OF FEED")
+                    
             else:
-                print(f"[DVR SYNC] effective_t={effective_t:.2f}s > video_dur={video_dur:.2f}s — will show END OF FEED")
-                
-        else:
-            frame_width = 1280
-            frame_height = 720
-            fps = 10.0
+                frame_width = 1280
+                frame_height = 720
+                fps = 10.0
             
         camera_id_global = new_camera_id
         
