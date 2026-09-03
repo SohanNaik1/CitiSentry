@@ -790,7 +790,7 @@ def switch_camera():
     with state_lock:
         print(f"\n[VISION] Switching camera to {new_camera_id}: {video_path}")
         
-        new_cap = cv2.VideoCapture(video_path)
+        new_cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
         if not new_cap.isOpened():
             print(f"[WARNING] Failed to open {video_path}. Switching to NO SIGNAL mode.", file=sys.stderr)
             new_cap = None
@@ -870,7 +870,7 @@ if __name__ == "__main__":
                 video_path = alt_path2
 
     print(f"[VISION] Opening video: {video_path}")
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         print(f"[ERROR] Failed to open {video_path}", file=sys.stderr)
         sys.exit(1)

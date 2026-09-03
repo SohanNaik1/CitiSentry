@@ -68,9 +68,18 @@ cd ..
 Create the virtual environment directly in the **repository root**:
 ```cmd
 python -m venv .venv
-call .venv\Scripts\activate
 ```
-*(On PowerShell, run: `.\.venv\Scripts\Activate.ps1`. If script execution is restricted, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first).*
+
+**To activate in Command Prompt (`cmd.exe`):**
+```cmd
+.venv\Scripts\activate
+```
+
+**To activate in PowerShell:**
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+*(Note: If PowerShell throws a script execution restriction error, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first).*
 
 ### 4. Install Python Dependencies
 Choose the option matching your hardware:
