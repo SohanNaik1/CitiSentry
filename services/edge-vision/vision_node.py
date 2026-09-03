@@ -34,12 +34,12 @@ except Exception as e:
 
 PLATE_REGEX = re.compile(r'^(?!.*FEDEX)[A-Z0-9]{4,10}$')
 
-print("[VISION] Initializing Deep Re-ID Model (ResNet50)...")
+print("[VISION] Initializing Deep Re-ID Model (ConvNeXt-Large)...")
 try:
     reid_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    reid_model = models.resnet50(weights='DEFAULT').to(reid_device)
-    # Remove the classifier head to just get the raw embedding
-    reid_model.fc = torch.nn.Identity()
+    reid_model = models.convnext_large(weights='DEFAULT').to(reid_device)
+    # ConvNeXt classifier is a Sequential block; replace the final Linear layer
+    reid_model.classifier[2] = torch.nn.Identity()
     reid_model.eval()
     
     reid_transform = transforms.Compose([
@@ -87,7 +87,7 @@ MAX_ROI_SEARCH_FRAMES = 30
 latest_jpeg = None
 frame_condition = threading.Condition()
 
-model = YOLO("yolov8s.pt")
+model = YOLO("yolo11x.pt")
 
 def xywh_to_xyxy(box: tuple[int, ...]) -> list[float]:
     return [float(box[0]), float(box[1]), float(box[0] + box[2]), float(box[1] + box[3])]
@@ -255,7 +255,7 @@ def process_video():
         frame_count += 1
 
         if current_target_id is not None or current_roi is not None:
-            results = model.track(frame, persist=True, tracker="botsort.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=0.25)
+            results = model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=0.25)
             
             if current_roi is not None:
                 found_id = None
@@ -597,7 +597,18 @@ def switch_camera():
     
     import os
     video_path = os.path.abspath(video_path_rel)
-    
+    if not os.path.exists(video_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        alt_path = os.path.abspath(os.path.join(script_dir, video_path_rel))
+        if os.path.exists(alt_path):
+            video_path = alt_path
+        else:
+            repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+            clean_rel = video_path_rel.replace("../../", "").replace("..\\..\\", "")
+            alt_path2 = os.path.abspath(os.path.join(repo_root, clean_rel))
+            if os.path.exists(alt_path2):
+                video_path = alt_path2
+
     with state_lock:
         print(f"\n[VISION] Switching camera to {new_camera_id}: {video_path}")
         
@@ -661,10 +672,23 @@ if __name__ == "__main__":
 
     camera_id_global = args.camera_id
     
-    print(f"[VISION] Opening video: {args.video}")
-    cap = cv2.VideoCapture(args.video)
+    video_path = os.path.abspath(args.video)
+    if not os.path.exists(video_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        alt_path = os.path.abspath(os.path.join(script_dir, args.video))
+        if os.path.exists(alt_path):
+            video_path = alt_path
+        else:
+            repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+            clean_rel = args.video.replace("../../", "").replace("..\\..\\", "")
+            alt_path2 = os.path.abspath(os.path.join(repo_root, clean_rel))
+            if os.path.exists(alt_path2):
+                video_path = alt_path2
+
+    print(f"[VISION] Opening video: {video_path}")
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[ERROR] Failed to open {args.video}", file=sys.stderr)
+        print(f"[ERROR] Failed to open {video_path}", file=sys.stderr)
         sys.exit(1)
 
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

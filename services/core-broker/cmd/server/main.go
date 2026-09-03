@@ -9,10 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -94,26 +92,7 @@ func main() {
 		}
 	}()
 
-	// Spawn the Python Flask server for MJPEG vision
-	pythonExe := "python3"
-	if runtime.GOOS == "windows" {
-		pythonExe = "python"
-	}
-	
-	scriptAbsPath, _ := filepath.Abs("../edge-vision/vision_node.py")
-	videoAbsPath, _ := filepath.Abs("../../web/public/videos/traffic.mp4")
-	
-	visionCmd := exec.Command(pythonExe, scriptAbsPath,
-		"--video", videoAbsPath,
-		"--camera_id", "CAM-001",
-	)
-	visionCmd.Stdout = os.Stdout
-	visionCmd.Stderr = os.Stderr
-
-	if err := visionCmd.Start(); err != nil {
-		log.Fatalf("[FATAL] Failed to start vision node: %v", err)
-	}
-	log.Printf("[BOOT] Spawned Python vision node (PID %d)", visionCmd.Process.Pid)
+	// Python vision node is orchestrated externally via start.sh
 
 	// Graceful shutdown: wait for SIGINT or SIGTERM
 	quit := make(chan os.Signal, 1)
@@ -121,10 +100,6 @@ func main() {
 	sig := <-quit
 	log.Printf("[SHUTDOWN] Received signal %v, initiating graceful shutdown...", sig)
 
-	if visionCmd.Process != nil {
-		log.Printf("[SHUTDOWN] Killing Python vision node (PID %d)...", visionCmd.Process.Pid)
-		visionCmd.Process.Kill()
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

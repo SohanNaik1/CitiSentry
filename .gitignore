@@ -53,6 +53,7 @@ coverage.out
 
 # Binaries
 broker
+server
 
 # OS Generated Files
 Thumbs.db
