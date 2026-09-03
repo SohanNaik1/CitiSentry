@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import uuid
+import os
 
 import cv2
 import numpy as np
@@ -52,6 +53,12 @@ except Exception as e:
     print(f"[ERROR] Failed to init Re-ID model: {e}", file=sys.stderr)
     reid_model = None
 
+# ── Absolute Timeline Master Clock ──────────────────────────────────────────
+# The longest video in the Iowa S04 dataset is c026.avi at 71.0 seconds.
+# ALL cameras share this single master cycle period. At effective_time = 71.0,
+# the modulo wraps back to 0.0 and the entire intersection loops seamlessly.
+MASTER_CYCLE_SEC: float = 71.0
+
 # Global state
 state_lock = threading.Lock()
 cap = None
@@ -59,11 +66,16 @@ frame_width = 0
 frame_height = 0
 fps = 30.0
 camera_id_global = "CAM-001"
-dvr_start_time = time.time()
-centroid_history = collections.deque(maxlen=15)
+centroid_history: collections.deque = collections.deque(maxlen=15)
 prev_center = None
 
-embedding_db = {} # Maps system_id -> embedding (tensor)
+# DVR clock state (all protected by state_lock)
+dvr_start_time: float = time.time()       # Wall-clock anchor for t=0
+dvr_paused_accumulator: float = 0.0       # Total seconds spent paused (subtracted from elapsed)
+dvr_pause_start: float | None = None      # Wall-clock timestamp when pause began, None if playing
+is_dvr_paused: bool = False               # True when the timeline is frozen
+
+embedding_db: dict = {}  # Maps system_id -> embedding (tensor)
 active_system_id = None
 active_embedding = None
 reid_matched = False
@@ -77,7 +89,7 @@ locked_color = "OTHER"
 consecutive_misses = 0
 MAX_CONSECUTIVE_MISSES = 90
 dispatch_count = 0
-is_paused = False
+is_paused = False         # Legacy per-target pause (ROI selection flow)
 smoothed_speed = 0.0
 
 target_roi = None
@@ -86,6 +98,43 @@ MAX_ROI_SEARCH_FRAMES = 30
 
 latest_jpeg = None
 frame_condition = threading.Condition()
+
+
+def get_effective_time() -> float:
+    """Compute the current position within the master scenario cycle.
+
+    Returns a value in [0.0, MASTER_CYCLE_SEC) representing where every
+    camera should be right now. Accounts for accumulated pause duration
+    so pausing freezes the timeline and unpausing resumes seamlessly.
+
+    Must be called while state_lock is held, or with local copies of the
+    DVR variables.
+    """
+    now = time.time()
+    wall_elapsed = now - dvr_start_time
+    if is_dvr_paused and dvr_pause_start is not None:
+        # While paused, subtract the time since pause began
+        current_pause_duration = now - dvr_pause_start
+        virtual_elapsed = wall_elapsed - dvr_paused_accumulator - current_pause_duration
+    else:
+        virtual_elapsed = wall_elapsed - dvr_paused_accumulator
+    # Clamp to non-negative before modulo (guards against float drift)
+    virtual_elapsed = max(0.0, virtual_elapsed)
+    return virtual_elapsed % MASTER_CYCLE_SEC
+
+
+def get_video_duration(capture: cv2.VideoCapture) -> float:
+    """Return the duration (in seconds) of the video loaded in a cv2.VideoCapture.
+
+    Falls back to 0.0 if metadata is unavailable.
+    """
+    total_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+    vid_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    if vid_fps <= 0:
+        vid_fps = 30.0
+    if total_frames > 0:
+        return total_frames / vid_fps
+    return 0.0
 
 model = YOLO("yolo11x.pt")
 
@@ -190,8 +239,8 @@ def process_video():
     frame_count = 0
 
     while True:
+        # ── No camera attached: render NO SIGNAL slate ──────────────────
         if cap is None:
-            import numpy as np
             frame = np.zeros((720, 1280, 3), dtype=np.uint8)
             cv2.putText(frame, "NO SIGNAL", (520, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
             ret, jpeg = cv2.imencode('.jpg', frame)
@@ -208,7 +257,18 @@ def process_video():
             current_paused = is_paused
             current_roi = target_roi
             current_roi_frames = roi_search_frames
+            local_dvr_paused = is_dvr_paused
             
+        # ── DVR Timeline paused: keep yielding last frame at ~5 FPS ────
+        # The MJPEG stream must continue producing frames or the browser
+        # <img> tag will stall and show a broken-image icon.
+        if local_dvr_paused:
+            with frame_condition:
+                if latest_jpeg is not None:
+                    frame_condition.notify_all()
+            time.sleep(0.2)   # ~5 FPS idle yield
+            continue
+
         if current_paused:
             time.sleep(0.1)
             continue
@@ -219,37 +279,72 @@ def process_video():
             
         t0 = time.time()
         
+        # ── Absolute Timeline: compute where we are in the 71s cycle ───
+        with state_lock:
+            effective_t = get_effective_time()
+        
+        video_dur = get_video_duration(current_cap)
+        
+        if video_dur > 0.0 and effective_t >= video_dur:
+            # This video is shorter than 71s and we've passed its end.
+            # Render a tactical "END OF FEED" black frame instead of
+            # looping the short video independently.
+            h = frame_height if frame_height > 0 else 720
+            w = frame_width if frame_width > 0 else 1280
+            black_frame = np.zeros((h, w, 3), dtype=np.uint8)
+            
+            # Outer border glow
+            cv2.rectangle(black_frame, (2, 2), (w - 3, h - 3), (0, 80, 80), 1)
+            
+            # Primary message
+            msg = "[ END OF FEED - AWAITING SYNC ]"
+            text_size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+            tx = (w - text_size[0]) // 2
+            ty = (h - text_size[1]) // 2
+            cv2.putText(black_frame, msg, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 180, 180), 2)
+            
+            # Countdown to next cycle
+            remaining = MASTER_CYCLE_SEC - effective_t
+            countdown_msg = f"CYCLE RESTART IN {remaining:.1f}s"
+            cs = cv2.getTextSize(countdown_msg, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            cv2.putText(black_frame, countdown_msg, ((w - cs[0]) // 2, ty + 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 120, 120), 1)
+            
+            ret_enc, jpeg = cv2.imencode('.jpg', black_frame)
+            if ret_enc:
+                with frame_condition:
+                    latest_jpeg = jpeg.tobytes()
+                    frame_condition.notify_all()
+            
+            time.sleep(0.1)
+            continue
+        
+        # ── Seek the video to the master-clock position ────────────────
+        # Always seek to effective_t so that after camera switches,
+        # end-of-feed gaps, or DVR scrubs, the video lands on the exact
+        # correct frame.
+        if video_dur > 0.0:
+            current_pos_sec = current_cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            drift = abs(current_pos_sec - effective_t)
+            # Only hard-seek if drift exceeds half a frame duration to
+            # avoid unnecessary seeks on every iteration
+            if drift > (0.5 / fps):
+                current_cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
+        
         try:
             ret, frame = current_cap.read()
         except Exception:
             ret = False
             
         if not ret:
-            # Loop video maintaining Global DVR sync
+            # The seek landed past the last decodable frame.
+            # Reset to frame 0 and try once more.
+            current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             try:
-                elapsed_sec = time.time() - dvr_start_time
-                total_frames = current_cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                vid_fps = current_cap.get(cv2.CAP_PROP_FPS) or 30.0
-                if vid_fps <= 0:
-                    vid_fps = 30.0
-                    
-                if total_frames > 0:
-                    video_duration = total_frames / vid_fps
-                    seek_sec = elapsed_sec % video_duration
-                    current_cap.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
-                else:
-                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    
-                # Grab the valid frame after seeking
                 ret, frame = current_cap.read()
-                if not ret:
-                    # We are in a "dead zone" (calculated duration > actual frames).
-                    # Force reset to frame 0 immediately to prevent an infinite loop!
-                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = current_cap.read()
-                    if not ret:
-                        continue
             except Exception:
+                ret = False
+            if not ret:
                 continue
             
         frame_count += 1
@@ -584,9 +679,93 @@ def set_target():
         
     return jsonify({"status": "searching"})
 
+# ── DVR Timeline Control Endpoints ──────────────────────────────────────────
+
+@app.route('/dvr/status', methods=['GET'])
+def dvr_status():
+    """Return the current master DVR clock state for the frontend scrubber."""
+    with state_lock:
+        effective_t = get_effective_time()
+        paused = is_dvr_paused
+    return jsonify({
+        "effective_time": round(effective_t, 2),
+        "master_cycle_sec": MASTER_CYCLE_SEC,
+        "is_paused": paused,
+        "camera_id": camera_id_global,
+    })
+
+
+@app.route('/dvr/seek', methods=['POST'])
+def dvr_seek():
+    """Jump the master timeline to a specific second within [0, MASTER_CYCLE_SEC).
+
+    The math: We want get_effective_time() to return `seek_sec` immediately.
+    effective_time = (now - dvr_start_time - paused_acc) % MASTER_CYCLE_SEC
+
+    When playing:  virtual_elapsed = now - dvr_start_time - paused_acc
+                   Set dvr_start_time = now - paused_acc - seek_sec
+    When paused:   virtual_elapsed also subtracts (now - dvr_pause_start).
+                   Reset dvr_pause_start = now so that extra term is zero,
+                   then set dvr_start_time = now - paused_acc - seek_sec.
+    """
+    global dvr_start_time, dvr_pause_start
+
+    data = request.json
+    if not data or 'seek_sec' not in data:
+        return jsonify({"error": "Missing seek_sec"}), 400
+
+    seek_sec = float(data['seek_sec'])
+    seek_sec = max(0.0, min(seek_sec, MASTER_CYCLE_SEC - 0.01))
+
+    now = time.time()
+    with state_lock:
+        if is_dvr_paused and dvr_pause_start is not None:
+            # Flush the old pause segment into the accumulator and restart
+            # the pause clock at 'now' so get_effective_time()'s
+            # (now - dvr_pause_start) term is zero at this instant.
+            dvr_paused_accumulator_local = dvr_paused_accumulator + (now - dvr_pause_start)
+            dvr_pause_start = now
+            dvr_start_time = now - dvr_paused_accumulator_local - seek_sec
+        else:
+            dvr_start_time = now - dvr_paused_accumulator - seek_sec
+        effective_t = get_effective_time()
+
+    print(f"[DVR] Seeked to {effective_t:.2f}s (requested {seek_sec:.2f}s)")
+    return jsonify({"status": "seeked", "effective_time": round(effective_t, 2)})
+
+
+@app.route('/dvr/toggle_pause', methods=['POST'])
+def dvr_toggle_pause():
+    """Toggle the master DVR timeline between playing and paused.
+
+    When pausing:  Record dvr_pause_start = now.
+    When resuming: Add (now - dvr_pause_start) to dvr_paused_accumulator,
+                   then clear dvr_pause_start.
+    """
+    global is_dvr_paused, dvr_pause_start, dvr_paused_accumulator
+
+    now = time.time()
+    with state_lock:
+        if is_dvr_paused:
+            # ── Resume ──
+            if dvr_pause_start is not None:
+                dvr_paused_accumulator += (now - dvr_pause_start)
+                dvr_pause_start = None
+            is_dvr_paused = False
+            new_state = "playing"
+        else:
+            # ── Pause ──
+            dvr_pause_start = now
+            is_dvr_paused = True
+            new_state = "paused"
+        effective_t = get_effective_time()
+
+    print(f"[DVR] Timeline {new_state} at {effective_t:.2f}s")
+    return jsonify({"status": new_state, "effective_time": round(effective_t, 2)})
+
 @app.route('/switch_camera', methods=['POST'])
 def switch_camera():
-    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed, dvr_start_time
+    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed
     
     data = request.json
     if not data or 'video_path' not in data or 'camera_id' not in data:
@@ -595,7 +774,6 @@ def switch_camera():
     video_path_rel = data['video_path']
     new_camera_id = data['camera_id']
     
-    import os
     video_path = os.path.abspath(video_path_rel)
     if not os.path.exists(video_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -629,14 +807,19 @@ def switch_camera():
             if fps <= 0:
                 fps = 30.0
                 
-            elapsed_sec = time.time() - dvr_start_time
-            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            # ── Absolute Timeline Seek ──────────────────────────────
+            # Compute exactly where the master clock is right now and
+            # seek the new video to that position. If effective_time
+            # exceeds this video's duration, the process_video loop
+            # will render the "END OF FEED" black frame automatically.
+            effective_t = get_effective_time()
+            video_dur = get_video_duration(cap)
             
-            if total_frames > 0:
-                video_duration = total_frames / fps
-                seek_sec = elapsed_sec % video_duration
-                cap.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
-                print(f"[DVR SYNC] Seeked to {seek_sec:.2f}s (Modulo elapsed: {elapsed_sec:.2f}s)")
+            if video_dur > 0.0 and effective_t < video_dur:
+                cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
+                print(f"[DVR SYNC] Seeked to {effective_t:.2f}s / {video_dur:.2f}s (Master cycle: {MASTER_CYCLE_SEC:.1f}s)")
+            else:
+                print(f"[DVR SYNC] effective_t={effective_t:.2f}s > video_dur={video_dur:.2f}s — will show END OF FEED")
                 
         else:
             frame_width = 1280

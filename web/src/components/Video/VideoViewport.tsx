@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, MouseEvent } from 'react';
 import { useTelemetryStore } from '../../stores/useTelemetryStore';
+import DVRControls from './DVRControls';
 
 export default function VideoViewport() {
   const trackedPlate = useTelemetryStore((state) => state.trackedPlate);
@@ -116,52 +117,58 @@ export default function VideoViewport() {
   };
 
   return (
-    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800">
-      {/* Top Bar HUD */}
-      <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-black/60 pointer-events-none">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
-            [ VIDEO FEED ]
-          </span>
+    <div className="flex flex-col w-full h-full rounded overflow-hidden border border-zinc-800">
+      {/* ── Video Feed Area ───────────────────────────────────── */}
+      <div className="relative flex-1 min-h-0 bg-black">
+        {/* Top Bar HUD */}
+        <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-black/60 pointer-events-none">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
+              [ VIDEO FEED ]
+            </span>
+          </div>
+          <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
         </div>
-        <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
-      </div>
 
-      {/* The MJPEG Stream */}
-      <img
-        ref={imgRef}
-        src="http://localhost:5000/video_feed"
-        className="w-full h-full object-contain pointer-events-none"
-        alt="Camera Feed"
-        draggable={false}
-      />
+        {/* The MJPEG Stream */}
+        <img
+          ref={imgRef}
+          src="http://localhost:5000/video_feed"
+          className="w-full h-full object-contain pointer-events-none"
+          alt="Camera Feed"
+          draggable={false}
+        />
 
-      {/* Overlay for ROI Dragging */}
-      <div
-        ref={containerRef}
-        className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-      >
-        {isDrawing && (
-          <div
-            className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
-            style={{
-              left: Math.min(startPos.x, currentPos.x),
-              top: Math.min(startPos.y, currentPos.y),
-              width: Math.abs(currentPos.x - startPos.x),
-              height: Math.abs(currentPos.y - startPos.y),
-            }}
-          />
+        {/* Overlay for ROI Dragging */}
+        <div
+          ref={containerRef}
+          className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+        >
+          {isDrawing && (
+            <div
+              className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
+              style={{
+                left: Math.min(startPos.x, currentPos.x),
+                top: Math.min(startPos.y, currentPos.y),
+                width: Math.abs(currentPos.x - startPos.x),
+                height: Math.abs(currentPos.y - startPos.y),
+              }}
+            />
+          )}
+        </div>
+
+        {isSelectingMode && !isDrawing && (
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
+            DRAW ROI OVER TARGET
+          </div>
         )}
       </div>
 
-      {isSelectingMode && !isDrawing && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
-          DRAW ROI OVER TARGET
-        </div>
-      )}
+      {/* ── DVR Tactical Scrubber ─────────────────────────────── */}
+      <DVRControls />
     </div>
   );
 }
