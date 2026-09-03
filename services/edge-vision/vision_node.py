@@ -321,18 +321,28 @@ def process_video():
             time.sleep(0.1)
             continue
         
-        # ── Seek the video to the master-clock position ────────────────
-        # Always seek to effective_t so that after camera switches,
-        # end-of-feed gaps, or DVR scrubs, the video lands on the exact
-        # correct frame.
+        # ── Robust A/V Drift-Correction Engine ─────────────────────────
+        # Soft-syncs video to the Master Clock using frame dropping/pausing,
+        # avoiding disastrous cap.set() bottleneck on Windows decoders.
         with camera_lock:
+            ret = False
+            frame = None
             if video_dur > 0.0:
-                current_pos_sec = current_cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-                drift = abs(current_pos_sec - effective_t)
-                # Only hard-seek if drift exceeds half a frame duration to
-                # avoid unnecessary seeks on every iteration
-                if drift > (0.5 / fps):
-                    current_cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
+                current_frame_idx = current_cap.get(cv2.CAP_PROP_POS_FRAMES)
+                current_pos_sec = current_frame_idx / fps if fps > 0 else 0.0
+                drift = effective_t - current_pos_sec
+
+                if abs(drift) > 1.5:
+                    # Hard Seek: DVR scrub, camera switch, or loop boundary (e.g. 71s -> 0s)
+                    target_frame = int(effective_t * fps)
+                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                elif drift > (2.0 / fps):
+                    # Soft Catch-Up: Video is lagging. Silently drop a frame.
+                    current_cap.grab()
+                elif drift < -(1.0 / fps):
+                    # Soft Pause: Video is ahead. Wait for Master Clock.
+                    time.sleep(0.01)
+                    continue
             
             try:
                 ret, frame = current_cap.read()
@@ -340,15 +350,15 @@ def process_video():
                 ret = False
                 
             if not ret:
-                # The seek landed past the last decodable frame.
-                # Reset to frame 0 and try once more.
+                # Reached actual EOF or decode error, loop back to 0
                 current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 try:
                     ret, frame = current_cap.read()
                 except Exception:
                     ret = False
-        
+                    
         if not ret:
+            time.sleep(0.1)
             continue
             
         frame_count += 1
