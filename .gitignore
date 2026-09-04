@@ -48,6 +48,7 @@ coverage.out
 
 # ML Models & Temp Files
 *.pt
+*.pth
 *.part
 *.onnx
 
