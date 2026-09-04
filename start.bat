@@ -21,6 +21,9 @@ timeout /t 1 /nobreak >nul
 if exist "%ROOT_DIR%.venv\Scripts\python.exe" (
     set "PYTHON_EXE=%ROOT_DIR%.venv\Scripts\python.exe"
     echo [CitiSentry] Using virtual environment: .venv
+) else if exist "%ROOT_DIR%web\.venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%ROOT_DIR%web\.venv\Scripts\python.exe"
+    echo [CitiSentry] Using virtual environment: web\.venv
 ) else if exist "%ROOT_DIR%venv\Scripts\python.exe" (
     set "PYTHON_EXE=%ROOT_DIR%venv\Scripts\python.exe"
     echo [CitiSentry] Using virtual environment: venv

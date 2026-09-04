@@ -19,7 +19,7 @@ function formatTimecode(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${secs < 10 ? '0' : ''}${secs.toFixed(1)}`;
 }
 
-const VISION_URL = 'http://localhost:5000';
+const VISION_URL = 'http://127.0.0.1:5000';
 
 export default function DVRControls() {
   const [dvrState, setDvrState] = useState<DVRState>({

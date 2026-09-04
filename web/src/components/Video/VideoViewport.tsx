@@ -27,7 +27,7 @@ export default function VideoViewport() {
 
   useEffect(() => {
     // Also reset video to beginning on mount
-    fetch('http://localhost:5000/reset', { method: 'POST' }).catch(() => {});
+    fetch('http://127.0.0.1:5000/reset', { method: 'POST' }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -106,7 +106,7 @@ export default function VideoViewport() {
       useTelemetryStore.getState().setActiveSystemId(brokerData.system_id);
 
       // 3. Start tracking on vision node
-      await fetch('http://localhost:5000/set_target', {
+      await fetch('http://127.0.0.1:5000/set_target', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plate: trackedPlate, roi: [xmin, ymin, xmax, ymax] }),
@@ -133,7 +133,7 @@ export default function VideoViewport() {
         {/* The MJPEG Stream */}
         <img
           ref={imgRef}
-          src="http://localhost:5000/video_feed"
+          src="http://127.0.0.1:5000/video_feed"
           className="w-full h-full object-contain pointer-events-none"
           alt="Camera Feed"
           draggable={false}

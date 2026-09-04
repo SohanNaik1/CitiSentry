@@ -48,7 +48,7 @@ export default function Home() {
     useTelemetryStore.getState().incrementTrackAttempt();
     
     try {
-      await fetch(`http://localhost:5000/pause`, {
+      await fetch(`http://127.0.0.1:5000/pause`, {
         method: 'POST',
       });
     } catch (err) {
@@ -58,9 +58,14 @@ export default function Home() {
 
   const handleStop = async () => {
     try {
-      // Just clear local state, tracking will be orphaned on the backend
+      // Clear local state
       useTelemetryStore.getState().setActiveTarget(null);
       useTelemetryStore.getState().setTrackedPlate(null);
+      
+      // Stop tracking on backend
+      await fetch(`http://127.0.0.1:5000/reset`, {
+        method: 'POST',
+      });
     } catch (err) {
       console.error('Failed to stop tracking:', err);
     }

@@ -16,10 +16,7 @@ import re
 from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 from ultralytics import YOLO
-import torch
-import torchvision.models as models
-import torchvision.transforms as transforms
-import torch.nn.functional as F
+from vehicle_reid import VehicleReIDEngine
 
 app = Flask(__name__)
 CORS(app)
@@ -35,23 +32,8 @@ except Exception as e:
 
 PLATE_REGEX = re.compile(r'^(?!.*FEDEX)[A-Z0-9]{4,10}$')
 
-print("[VISION] Initializing Deep Re-ID Model (ConvNeXt-Large)...")
-try:
-    reid_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    reid_model = models.convnext_large(weights='DEFAULT').to(reid_device)
-    # ConvNeXt classifier is a Sequential block; replace the final Linear layer
-    reid_model.classifier[2] = torch.nn.Identity()
-    reid_model.eval()
-    
-    reid_transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-except Exception as e:
-    print(f"[ERROR] Failed to init Re-ID model: {e}", file=sys.stderr)
-    reid_model = None
+print("[VISION] Initializing OSNet Vehicle Re-ID Engine...")
+reid_engine = VehicleReIDEngine()
 
 # ── Absolute Timeline Master Clock ──────────────────────────────────────────
 # The longest video in the Iowa S04 dataset is c026.avi at 71.0 seconds.
@@ -63,6 +45,7 @@ MASTER_CYCLE_SEC: float = 71.0
 state_lock = threading.Lock()
 camera_lock = threading.RLock() # Protects cv2.VideoCapture calls
 cap = None
+pending_video_path = None
 frame_width = 0
 frame_height = 0
 fps = 30.0
@@ -79,6 +62,8 @@ is_dvr_paused: bool = False               # True when the timeline is frozen
 embedding_db: dict = {}  # Maps system_id -> embedding (tensor)
 active_system_id = None
 active_embedding = None
+last_tracked_xyxy = None
+last_tracked_area = None
 reid_matched = False
 
 target_plate = None
@@ -158,6 +143,23 @@ def compute_iou(box_a: list[float], box_b: list[float]) -> float:
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
 
+def compute_iom(box_a: list[float], box_b: list[float]) -> float:
+    """Intersection over Minimum Area (IoM). Good for part-to-whole matching."""
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    x2 = min(box_a[2], box_b[2])
+    y2 = min(box_a[3], box_b[3])
+
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    if inter == 0.0:
+        return 0.0
+
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    min_area = min(area_a, area_b)
+    
+    return inter / min_area if min_area > 0 else 0.0
+
 YOLO_COCO_CLASSES = {
     2: "SEDAN",
     3: "MOTORCYCLE",
@@ -211,9 +213,8 @@ def extract_dominant_color(frame: np.ndarray, bbox: list[float]) -> str:
     except Exception:
         return "UNKNOWN"
 
-def get_embedding(frame: np.ndarray, bbox: list[float]) -> torch.Tensor:
-    if reid_model is None:
-        return None
+def get_embedding(frame: np.ndarray, bbox: list[float]) -> np.ndarray | None:
+    """Extract an OSNet embedding from a bounding box crop. Returns a 1-D numpy array or None."""
     try:
         x1, y1, x2, y2 = map(int, bbox)
         x1, y1 = max(0, x1), max(0, y1)
@@ -223,24 +224,51 @@ def get_embedding(frame: np.ndarray, bbox: list[float]) -> torch.Tensor:
             return None
             
         crop = frame[y1:y2, x1:x2]
-        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        input_tensor = reid_transform(crop_rgb).unsqueeze(0).to(reid_device)
-        
-        with torch.no_grad():
-            embedding = reid_model(input_tensor)
-            # L2 Normalize
-            embedding = F.normalize(embedding, p=2, dim=1)
-            return embedding
+        return reid_engine.extract_embedding(crop)
     except Exception as e:
         print(f"[ERROR] Embedding failed: {e}")
         return None
 
 def process_video():
-    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed, centroid_history, prev_center, active_system_id, reid_matched
+    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed, centroid_history, prev_center, active_system_id, reid_matched, last_tracked_xyxy, last_tracked_area
+    global pending_video_path, frame_width, frame_height, fps
     
     frame_count = 0
+    active_embedding = None
 
     while True:
+        with state_lock:
+            local_pending = pending_video_path
+            if pending_video_path is not None:
+                pending_video_path = None
+                
+        if local_pending is not None:
+            new_cap = cv2.VideoCapture(local_pending, cv2.CAP_FFMPEG)
+            if not new_cap.isOpened():
+                print(f"[ERROR] Failed to open {local_pending}", file=sys.stderr)
+                new_cap = None
+            with camera_lock:
+                if cap is not None:
+                    cap.release()
+                cap = new_cap
+                if cap is not None:
+                    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    if fps <= 0:
+                        fps = 30.0
+                    
+                    with state_lock:
+                        effective_t = get_effective_time()
+                    video_dur = get_video_duration(cap)
+                    if video_dur > 0.0 and effective_t < video_dur:
+                        cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
+                        print(f"[DVR SYNC] Seeked to {effective_t:.2f}s")
+                else:
+                    frame_width = 1280
+                    frame_height = 720
+                    fps = 10.0
+
         # ── No camera attached: render NO SIGNAL slate ──────────────────
         if cap is None:
             frame = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -364,7 +392,9 @@ def process_video():
         frame_count += 1
 
         if current_target_id is not None or current_roi is not None:
-            results = model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=0.25)
+            # Use 0.30 for initial ROI locking to avoid ghosts, but 0.15 for tracking to maintain through occlusions
+            current_conf = 0.15 if current_target_id is not None else 0.30
+            results = model.track(frame, persist=True, tracker="botsort.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=current_conf)
             
             if current_roi is not None:
                 found_id = None
@@ -378,7 +408,6 @@ def process_video():
                     
                     user_cx = (current_roi[0] + current_roi[2]) / 2
                     user_cy = (current_roi[1] + current_roi[3]) / 2
-                    user_diag = math.hypot(current_roi[2] - current_roi[0], current_roi[3] - current_roi[1]) + 1e-6
                     
                     best_score = -float('inf')
                     for i in range(len(boxes)):
@@ -387,12 +416,16 @@ def process_video():
                         cy = (box[1] + box[3]) / 2
                         dist = math.hypot(cx - user_cx, cy - user_cy)
                         
-                        norm_dist = dist / user_diag
-                        iou = compute_iou(current_roi, box)
+                        # Normalize distance against YOLO bounding box diagonal instead of the user's box
+                        box_diag = math.hypot(box[2] - box[0], box[3] - box[1]) + 1e-6
+                        norm_dist = dist / box_diag
                         
-                        score = iou - (norm_dist * 1.5)
+                        # Use Intersection over Minimum Area (IoM)
+                        iom = compute_iom(current_roi, box)
                         
-                        if (iou > 0.0 or norm_dist < 1.0) and score > best_score:
+                        score = iom - (norm_dist * 1.5)
+                        
+                        if (iom > 0.0 or norm_dist < 1.0) and score > best_score:
                             best_score = score
                             found_id = ids[i]
                             found_bbox = box
@@ -418,15 +451,15 @@ def process_video():
                             
                             # Compare with known embeddings
                             for sys_id, saved_emb in embedding_db.items():
-                                sim = F.cosine_similarity(emb, saved_emb).item()
+                                sim = reid_engine.compute_similarity(emb, saved_emb)
                                 if sim > best_sim:
                                     best_sim = sim
                                     best_match_id = sys_id
                                     
-                            if best_sim > 0.85:
+                            if best_sim > 0.75:
                                 active_system_id = best_match_id
                                 reid_matched = True
-                                print(f"[VISION] Deep Re-ID Match! {best_sim:.3f} -> {active_system_id}")
+                                print(f"[VISION] OSNet Re-ID Match! {best_sim:.3f} -> {active_system_id}")
                             else:
                                 if active_system_id is None:
                                     import uuid
@@ -456,6 +489,60 @@ def process_video():
                         tracked_xyxy = boxes[i]
                         break
 
+                # --- ACTIVE RE-ID SEARCH BLOCK ---
+                if tracked_xyxy is None and active_embedding is not None:
+                    # Check if the target drove off the edge of the frame
+                    left_frame = False
+                    if last_tracked_xyxy is not None:
+                        lx1, ly1, lx2, ly2 = last_tracked_xyxy
+                        if lx1 < 20 or ly1 < 20 or lx2 > frame_width - 20 or ly2 > frame_height - 20:
+                            left_frame = True
+                            
+                    if left_frame:
+                        print(f"\n[VISION] Target ID {current_target_id} exited frame. Tracking stopped.")
+                        with state_lock:
+                            target_track_id = None
+                            target_plate = None
+                            locked_plate = None
+                            locked_class = "UNKNOWN"
+                            locked_color = "OTHER"
+                            target_roi = None
+                        active_system_id = None
+                        active_embedding = None
+                        last_tracked_xyxy = None
+                        last_tracked_area = None
+                        reid_matched = False
+                        continue
+
+                    # Spatial tracker dropped the ID. Scan all current boxes.
+                    best_sim = -1.0
+                    best_match_idx = -1
+                    
+                    for i in range(len(ids)):
+                        candidate_w = boxes[i][2] - boxes[i][0]
+                        candidate_h = boxes[i][3] - boxes[i][1]
+                        candidate_area = candidate_w * candidate_h
+                        
+                        if last_tracked_area is not None and last_tracked_area > 0:
+                            scale_ratio = candidate_area / last_tracked_area
+                            if scale_ratio > 2.5 or scale_ratio < 0.4:
+                                continue  # Physics Gate: Physically impossible scale change
+                                
+                        emb = get_embedding(frame, boxes[i])
+                        if emb is not None:
+                            sim = reid_engine.compute_similarity(emb, active_embedding)
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_match_idx = i
+                                
+                    if best_sim > 0.82:
+                        print(f"\n[VISION] OSNet Active Re-ID Hijack! ID {current_target_id} -> {ids[best_match_idx]} (sim: {best_sim:.3f})")
+                        with state_lock:
+                            target_track_id = ids[best_match_idx]
+                        current_target_id = ids[best_match_idx]
+                        tracked_xyxy = boxes[best_match_idx]
+                # ---------------------------------
+
             if tracked_xyxy is not None:
                 consecutive_misses = 0
 
@@ -469,6 +556,28 @@ def process_video():
                 x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
                 x2, y2 = int(tracked_xyxy[2]), int(tracked_xyxy[3])
                 w, h = max(1, x2 - x1), max(1, y2 - y1)
+                
+                # --- DEPTH EXIT CHECK ---
+                current_area = w * h
+                MIN_TRACKING_AREA = 400
+                if current_area < MIN_TRACKING_AREA:
+                    print(f"\n[VISION] Target ID {current_target_id} too small (Depth Exit). Tracking stopped.")
+                    with state_lock:
+                        target_track_id = None
+                        target_plate = None
+                        locked_plate = None
+                        locked_class = "UNKNOWN"
+                        locked_color = "OTHER"
+                        target_roi = None
+                    active_system_id = None
+                    active_embedding = None
+                    last_tracked_xyxy = None
+                    last_tracked_area = None
+                    reid_matched = False
+                    continue
+                
+                last_tracked_area = current_area
+                # ------------------------
                 
                 cx = x1 + w / 2.0
                 cy = y1 + h / 2.0
@@ -518,6 +627,21 @@ def process_video():
                     import uuid
                     active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
                     reid_matched = False
+                    
+                # Dynamically update embedding to capture scale/rotation changes periodically
+                if frame_count % 15 == 0:
+                    current_emb = get_embedding(frame, tracked_xyxy)
+                    if current_emb is not None:
+                        if active_embedding is not None:
+                            # EMA Blend (numpy)
+                            blended = (active_embedding * 0.9) + (current_emb * 0.1)
+                            # Re-normalize (L2)
+                            norm = np.linalg.norm(blended)
+                            active_embedding = blended / norm if norm > 0 else blended
+                        else:
+                            active_embedding = current_emb
+                        # Persist to global DB for future re-acquisition
+                        embedding_db[active_system_id] = active_embedding
 
                 now = datetime.datetime.now(datetime.timezone.utc)
                 video_time_sec = frame_count / fps
@@ -541,7 +665,7 @@ def process_video():
                     },
                     "speed_kmh": round(float(smoothed_speed), 1),
                     "heading_degrees": 0.0,
-                    "reid_embeddings": (active_embedding[0][:128].cpu().numpy().tolist()) if active_embedding is not None else ([0.0] * 128),
+                    "reid_embeddings": (active_embedding[:128].tolist()) if active_embedding is not None else ([0.0] * 128),
                     "video_time_sec": round(float(video_time_sec), 3),
                 }
 
@@ -559,6 +683,7 @@ def process_video():
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 label = f"ID:{int(current_target_id)} {target_class} {smoothed_speed:.0f}km/h"
                 cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                last_tracked_xyxy = tracked_xyxy
             else:
                 consecutive_misses += 1
                 cv2.putText(
@@ -586,25 +711,11 @@ def process_video():
                 latest_jpeg = jpeg.tobytes()
                 frame_condition.notify_all()
 
-        # Calculate time taken and skip frames to maintain real-time 1x speed
+        # Calculate time taken and sleep if processing is faster than real-time
         processing_time = time.time() - t0
         expected_time = 1.0 / fps
         
-        if processing_time > expected_time:
-            # YOLO tracking was slow. Skip frames to catch up to real-time.
-            frames_to_skip = int(processing_time / expected_time)
-            # Limit skipping to prevent freezing on massive lag spikes
-            frames_to_skip = min(frames_to_skip, int(fps * 2))
-            
-            with camera_lock:
-                for _ in range(frames_to_skip):
-                    try:
-                        ret_skip, _ = current_cap.read()
-                        if not ret_skip:
-                            break
-                    except Exception:
-                        break
-        else:
+        if processing_time < expected_time:
             # We processed faster than real-time. Sleep to maintain original FPS.
             time.sleep(expected_time - processing_time)
 
@@ -631,9 +742,12 @@ def video_feed():
 
 @app.route('/pause', methods=['POST'])
 def pause_video():
-    global is_paused
+    global is_paused, is_dvr_paused, dvr_pause_start
     with state_lock:
         is_paused = True
+        if not is_dvr_paused:
+            dvr_pause_start = time.time()
+            is_dvr_paused = True
     return jsonify({"status": "paused"})
 
 @app.route('/reset', methods=['POST'])
@@ -655,6 +769,7 @@ def reset_video():
 @app.route('/set_target', methods=['POST'])
 def set_target():
     global target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, locked_plate, locked_class, locked_color, smoothed_speed, active_system_id
+    global is_dvr_paused, dvr_pause_start, dvr_paused_accumulator
     
     data = request.json
     if not data or 'plate' not in data or 'roi' not in data:
@@ -686,6 +801,14 @@ def set_target():
         is_paused = False
         smoothed_speed = 0.0
         active_system_id = incoming_sys_id
+        
+        # Auto-unpause the DVR timeline so tracking begins immediately
+        now = time.time()
+        if is_dvr_paused:
+            if dvr_pause_start is not None:
+                dvr_paused_accumulator += (now - dvr_pause_start)
+                dvr_pause_start = None
+            is_dvr_paused = False
         
     return jsonify({"status": "searching"})
 
@@ -775,7 +898,7 @@ def dvr_toggle_pause():
 
 @app.route('/switch_camera', methods=['POST'])
 def switch_camera():
-    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed
+    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed, pending_video_path
     
     data = request.json
     if not data or 'video_path' not in data or 'camera_id' not in data:
@@ -798,45 +921,8 @@ def switch_camera():
                 video_path = alt_path2
 
     with state_lock:
-        print(f"\n[VISION] Switching camera to {new_camera_id}: {video_path}")
-        
-        new_cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-        if not new_cap.isOpened():
-            print(f"[WARNING] Failed to open {video_path}. Switching to NO SIGNAL mode.", file=sys.stderr)
-            new_cap = None
-            
-        with camera_lock:
-            if cap is not None:
-                cap.release()
-                
-            cap = new_cap
-            
-            if cap is not None:
-                frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-                if fps <= 0:
-                    fps = 30.0
-                    
-                # ── Absolute Timeline Seek ──────────────────────────────
-                # Compute exactly where the master clock is right now and
-                # seek the new video to that position. If effective_time
-                # exceeds this video's duration, the process_video loop
-                # will render the "END OF FEED" black frame automatically.
-                effective_t = get_effective_time()
-                video_dur = get_video_duration(cap)
-                
-                if video_dur > 0.0 and effective_t < video_dur:
-                    cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
-                    print(f"[DVR SYNC] Seeked to {effective_t:.2f}s / {video_dur:.2f}s (Master cycle: {MASTER_CYCLE_SEC:.1f}s)")
-                else:
-                    print(f"[DVR SYNC] effective_t={effective_t:.2f}s > video_dur={video_dur:.2f}s — will show END OF FEED")
-                    
-            else:
-                frame_width = 1280
-                frame_height = 720
-                fps = 10.0
-            
+        print(f"\n[VISION] Queueing camera switch to {new_camera_id}: {video_path}")
+        pending_video_path = video_path
         camera_id_global = new_camera_id
         
         # Reset tracking state
@@ -854,6 +940,7 @@ def switch_camera():
         centroid_history.clear()
         prev_center = None
         active_system_id = None
+        last_tracked_area = None
         reid_matched = False
         
     return jsonify({"status": "switched", "camera_id": new_camera_id})
@@ -879,21 +966,20 @@ if __name__ == "__main__":
             if os.path.exists(alt_path2):
                 video_path = alt_path2
 
-    print(f"[VISION] Opening video: {video_path}")
-    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        print(f"[ERROR] Failed to open {video_path}", file=sys.stderr)
-        sys.exit(1)
-
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-    print(f"[VISION] Video loaded: {frame_width}x{frame_height} @ {fps} FPS")
+    print(f"[VISION] Queueing initial video: {video_path}")
+    pending_video_path = video_path
 
     # Start processing thread
     t = threading.Thread(target=process_video, daemon=True)
     t.start()
 
+    dvr_start_time = time.time()
+    
+    import signal
+    def handle_sigint(sig, frame):
+        print("\n[VISION] Shutting down...")
+        os._exit(0)
+    signal.signal(signal.SIGINT, handle_sigint)
+    
     print("[VISION] Starting Flask server on port 5000...")
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
