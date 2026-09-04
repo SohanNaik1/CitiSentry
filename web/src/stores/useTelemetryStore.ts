@@ -58,10 +58,10 @@ export const useTelemetryStore = create<TelemetryState>()((set) => ({
         }
       }
 
-      const existingIdx = state.telemetryLogs.findIndex(l => l.system_id === event.system_id);
+      const existingIdx = state.telemetryLogs.findIndex(l => l.system_id === event.system_id && l.camera_id === event.camera_id);
       if (existingIdx !== -1) {
         const newLogs = [...state.telemetryLogs];
-        newLogs[existingIdx] = event; // Overwrite to prevent spam
+        newLogs[existingIdx] = event; // Overwrite only for the same camera to prevent spam, but keep history across cameras
         return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate, activeSystemId: nextActiveSystemId };
       }
       

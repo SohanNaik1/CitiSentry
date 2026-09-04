@@ -9,6 +9,8 @@ import { useTelemetryStore } from '../../stores/useTelemetryStore';
 
 export default function MapContent() {
   const activeCameraId = useTelemetryStore((state) => state.activeCameraId);
+  const activeSystemId = useTelemetryStore((state) => state.activeSystemId);
+  const telemetryLogs = useTelemetryStore((state) => state.telemetryLogs);
 
   // Center on average coords
   const avgLat = cameraNodes.reduce((sum, node) => sum + node.lat, 0) / cameraNodes.length || 12.97;
@@ -16,15 +18,44 @@ export default function MapContent() {
 
   const setActiveCamera = useTelemetryStore((state) => state.setActiveCamera);
 
-  // Function to create a sleek custom blue map pin icon (teardrop)
-  const createIcon = (isActive: boolean) => {
-    const ringClass = isActive 
-      ? 'ring-4 ring-blue-500/50'
-      : 'ring-2 ring-white/50 border border-black/10';
+  // 1. Calculate the Trajectory Path
+  // Filter logs for the currently tracked system and sort chronologically
+  const activeLogs = telemetryLogs
+    .filter((log) => log.system_id === activeSystemId)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  // Extract unique sequential camera IDs visited
+  const visitedCameraIds = activeLogs.reduce((acc: string[], log) => {
+    if (acc.length === 0 || acc[acc.length - 1] !== log.camera_id) {
+      acc.push(log.camera_id);
+    }
+    return acc;
+  }, []);
+
+  // Map to coordinates for the Polyline
+  const pathCoords = visitedCameraIds
+    .map((camId) => {
+      const node = cameraNodes.find((n) => n.camera_id === camId);
+      return node ? ([node.lat, node.lng] as [number, number]) : null;
+    })
+    .filter(Boolean) as [number, number][];
+
+  // Identify the most recent camera where the suspect was seen
+  const lastVisitedCameraId = visitedCameraIds.length > 0 ? visitedCameraIds[visitedCameraIds.length - 1] : null;
+
+  // 2. The Green Pin (100% Certainty)
+  // Function to create a sleek custom map pin icon
+  const createIcon = (camId: string, isActive: boolean) => {
+    const isTargetLocation = camId === lastVisitedCameraId;
+    
+    const bgColor = isTargetLocation ? 'bg-emerald-500' : 'bg-blue-600';
+    const ringClass = isTargetLocation 
+      ? 'ring-4 ring-emerald-500/50 border-emerald-300'
+      : (isActive ? 'ring-4 ring-blue-500/50 border-white' : 'ring-2 ring-white/50 border border-black/10');
 
     return L.divIcon({
       className: 'bg-transparent',
-      html: `<div class="relative flex items-center justify-center w-6 h-6 bg-blue-600 rounded-t-full rounded-bl-full rotate-45 shadow-lg border-2 border-white ${ringClass}">
+      html: `<div class="relative flex items-center justify-center w-6 h-6 ${bgColor} rounded-t-full rounded-bl-full rotate-45 shadow-lg border-2 ${ringClass}">
                <div class="w-2 h-2 bg-white rounded-full -rotate-45"></div>
              </div>`,
       iconSize: [24, 24],
@@ -90,7 +121,7 @@ export default function MapContent() {
           <Marker 
             key={node.camera_id} 
             position={[node.lat, node.lng]} 
-            icon={createIcon(activeCameraId === node.camera_id)}
+            icon={createIcon(node.camera_id, activeCameraId === node.camera_id)}
             eventHandlers={{ click: () => handleCameraClick(node) }}
           >
             <Popup className="tactical-popup">
@@ -104,8 +135,13 @@ export default function MapContent() {
         ))}
       </MarkerClusterGroup>
 
-      {/* Polyline for trajectories (Preparation) */}
-      <Polyline positions={[]} pathOptions={{ color: '#06b6d4', weight: 3 }} />
+      {/* Polyline for trajectories (Outside MarkerClusterGroup) */}
+      {pathCoords.length > 1 && (
+        <Polyline 
+          positions={pathCoords} 
+          pathOptions={{ color: '#10b981', weight: 4, dashArray: '10, 10', opacity: 0.8 }} 
+        />
+      )}
     </MapContainer>
   );
 }

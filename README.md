@@ -110,13 +110,13 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ### 4. Install Core Python Dependencies
 With your `.venv` activated (you should see `(.venv)` in your terminal prompt):
 
-**Option A: NVIDIA GPU Acceleration (Highly Recommended for RTX 3050 / 4090)**
-```powershell
+**Option A: NVIDIA GPU Acceleration (Highly Recommended)**
+```cmd
 python -m pip install --upgrade pip
 pip install -r services\edge-vision\requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 **Option B: CPU Only**
-```powershell
+```cmd
 python -m pip install --upgrade pip
 pip install -r services\edge-vision\requirements.txt
 ```
@@ -156,7 +156,6 @@ Navigate to **`http://localhost:3000`** after booting.
 
 ```text
 CitiSentry/
-├── requirements.txt                    # Centralized python dependencies
 ├── start.bat / start.sh                # Multi-service bootstrap scripts
 ├── assets/                             # Architecture & UI screenshots
 ├── contracts/                          # Canonical JSON schemas & topologies
