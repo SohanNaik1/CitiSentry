@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, MouseEvent } from 'react';
 import { useTelemetryStore } from '../../stores/useTelemetryStore';
+import DVRControls from './DVRControls';
 
 export default function VideoViewport() {
   const trackedPlate = useTelemetryStore((state) => state.trackedPlate);
@@ -27,7 +28,7 @@ export default function VideoViewport() {
 
   useEffect(() => {
     // Also reset video to beginning on mount
-    fetch('http://localhost:5000/reset', { method: 'POST' }).catch(() => {});
+    fetch('http://127.0.0.1:5000/reset', { method: 'POST' }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -100,7 +101,7 @@ export default function VideoViewport() {
       useTelemetryStore.getState().setActiveSystemId(brokerData.system_id);
 
       // 3. Start tracking on vision node
-      await fetch('http://localhost:5000/set_target', {
+      await fetch('http://127.0.0.1:5000/set_target', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plate: trackedPlate || "UNKNOWN", roi: [xmin, ymin, xmax, ymax] }),
@@ -131,8 +132,6 @@ export default function VideoViewport() {
             RESET LOOP
           </button>
         </div>
-        <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
-      </div>
 
       {/* The MJPEG Stream with Robust Auto-Reconnect */}
       <img
@@ -147,32 +146,36 @@ export default function VideoViewport() {
         }}
       />
 
-      {/* Overlay for ROI Dragging */}
-      <div
-        ref={containerRef}
-        className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-      >
-        {isDrawing && (
-          <div
-            className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
-            style={{
-              left: Math.min(startPos.x, currentPos.x),
-              top: Math.min(startPos.y, currentPos.y),
-              width: Math.abs(currentPos.x - startPos.x),
-              height: Math.abs(currentPos.y - startPos.y),
-            }}
-          />
+        {/* Overlay for ROI Dragging */}
+        <div
+          ref={containerRef}
+          className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+        >
+          {isDrawing && (
+            <div
+              className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
+              style={{
+                left: Math.min(startPos.x, currentPos.x),
+                top: Math.min(startPos.y, currentPos.y),
+                width: Math.abs(currentPos.x - startPos.x),
+                height: Math.abs(currentPos.y - startPos.y),
+              }}
+            />
+          )}
+        </div>
+
+        {isSelectingMode && !isDrawing && (
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
+            DRAW ROI OVER TARGET
+          </div>
         )}
       </div>
 
-      {isSelectingMode && !isDrawing && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
-          DRAW ROI OVER TARGET
-        </div>
-      )}
+      {/* ── DVR Tactical Scrubber ─────────────────────────────── */}
+      <DVRControls />
     </div>
   );
 }

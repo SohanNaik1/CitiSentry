@@ -340,6 +340,16 @@ def process_video():
             time.sleep(0.2)
             continue
             
+        # ── DVR Timeline paused: keep yielding last frame at ~5 FPS ────
+        # The MJPEG stream must continue producing frames or the browser
+        # <img> tag will stall and show a broken-image icon.
+        if local_dvr_paused:
+            with frame_condition:
+                if latest_jpeg is not None:
+                    frame_condition.notify_all()
+            time.sleep(0.2)   # ~5 FPS idle yield
+            continue
+
         if current_paused:
             time.sleep(0.1)
             continue
