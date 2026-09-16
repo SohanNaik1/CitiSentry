@@ -112,51 +112,54 @@ export default function VideoViewport() {
   };
 
   return (
-    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800">
-      {/* Top Bar HUD */}
-      <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-black/60 pointer-events-none">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
-            [ VIDEO FEED ]
-          </span>
-          <button 
-            onClick={() => setIsSelectingMode(!isSelectingMode)}
-            className={`pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded ${isSelectingMode ? 'bg-amber-suspect/20 text-amber-suspect border-amber-suspect' : 'bg-slate-800 text-slate-400 border-slate-700'} border uppercase`}
-          >
-            {isSelectingMode ? 'CANCEL DRAW' : 'DRAW ROI'}
-          </button>
-          <button 
-            onClick={() => fetch('http://localhost:5000/reset_sync', { method: 'POST' }).catch(() => {})}
-            className="pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded bg-slate-800 text-slate-400 border-slate-700 border uppercase hover:bg-slate-700"
-          >
-            RESET LOOP
-          </button>
+    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800 flex flex-col">
+      {/* Main Video Display Area */}
+      <div className="relative flex-1 w-full min-h-0 bg-black overflow-hidden">
+        {/* Top Bar HUD */}
+        <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-black/60 pointer-events-none">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
+              [ VIDEO FEED ]
+            </span>
+            <button 
+              onClick={() => setIsSelectingMode(!isSelectingMode)}
+              className={`pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded ${isSelectingMode ? 'bg-amber-suspect/20 text-amber-suspect border-amber-suspect' : 'bg-slate-800 text-slate-400 border-slate-700'} border uppercase`}
+            >
+              {isSelectingMode ? 'CANCEL DRAW' : 'DRAW ROI'}
+            </button>
+            <button 
+              onClick={() => fetch('http://localhost:5000/reset_sync', { method: 'POST' }).catch(() => {})}
+              className="pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded bg-slate-800 text-slate-400 border-slate-700 border uppercase hover:bg-slate-700"
+            >
+              RESET LOOP
+            </button>
+          </div>
+          <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
         </div>
 
-      {/* The MJPEG Stream with Robust Auto-Reconnect */}
-      <img
-        ref={imgRef}
-        src={`http://localhost:5000/video_feed?t=${videoRetry}`}
-        className="w-full h-full object-contain pointer-events-none"
-        alt="Camera Feed"
-        draggable={false}
-        onError={() => {
-          // If the feed fails (backend booting or model downloading), wait 2s and try again
-          setTimeout(() => setVideoRetry(prev => prev + 1), 2000);
-        }}
-      />
+        {/* The MJPEG Stream with Robust Auto-Reconnect */}
+        <img
+          ref={imgRef}
+          src={`http://localhost:5000/video_feed?t=${videoRetry}`}
+          className="w-full h-full object-contain pointer-events-none"
+          alt="Camera Feed"
+          draggable={false}
+          onError={() => {
+            setTimeout(() => setVideoRetry(prev => prev + 1), 2000);
+          }}
+        />
 
         {/* Overlay for ROI Dragging */}
         <div
           ref={containerRef}
-          className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
+          className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair pointer-events-auto' : 'pointer-events-none'}`}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
         >
           {isDrawing && (
             <div
-              className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
+              className="absolute border-2 border-cyan-telemetry bg-cyan-telemetry/20"
               style={{
                 left: Math.min(startPos.x, currentPos.x),
                 top: Math.min(startPos.y, currentPos.y),
@@ -165,17 +168,19 @@ export default function VideoViewport() {
               }}
             />
           )}
-        </div>
 
-        {isSelectingMode && !isDrawing && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
-            DRAW ROI OVER TARGET
-          </div>
-        )}
+          {isSelectingMode && !isDrawing && (
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
+              DRAW ROI OVER TARGET
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ── DVR Tactical Scrubber ─────────────────────────────── */}
-      <DVRControls />
+      <div className="flex-shrink-0 z-20">
+        <DVRControls />
+      </div>
     </div>
   );
 }
