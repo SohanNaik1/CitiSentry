@@ -18,7 +18,7 @@ trap cleanup EXIT INT TERM
 # 1. Start Go Core Broker (Port 8080)
 echo "[CitiSentry] Starting Core Broker (Go) on port 8080..."
 cd services/core-broker
-go run cmd/server/*.go &
+STANDALONE_BROKER=true go run cmd/server/*.go &
 cd ../..
 
 # 2. Start Python Edge Vision Node (Port 5000)

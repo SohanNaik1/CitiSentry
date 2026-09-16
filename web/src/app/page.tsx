@@ -51,8 +51,23 @@ export default function Home() {
       await fetch(`http://localhost:5000/pause`, {
         method: 'POST',
       });
+      
+      const logs = useTelemetryStore.getState().telemetryLogs;
+      const targetEvent = logs.find(l => l.license_plate.text === plate);
+      
+      if (targetEvent && targetEvent.bounding_box) {
+        const brokerRes = await fetch('http://localhost:8080/api/v1/track/start', { method: 'POST' });
+        const brokerData = await brokerRes.json();
+        useTelemetryStore.getState().setActiveSystemId(brokerData.system_id);
+        
+        await fetch('http://localhost:5000/set_target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plate: plate, roi: targetEvent.bounding_box }),
+        });
+      }
     } catch (err) {
-      console.error('Failed to pause tracking:', err);
+      console.error('Failed to start tracking:', err);
     }
   };
 

@@ -7,6 +7,7 @@ export default function VideoViewport() {
   const trackedPlate = useTelemetryStore((state) => state.trackedPlate);
   const trackAttempt = useTelemetryStore((state) => state.trackAttempt);
   const [currentTime, setCurrentTime] = useState('');
+  const [videoRetry, setVideoRetry] = useState(0);
 
   // Update clock every second
   useEffect(() => {
@@ -30,13 +31,7 @@ export default function VideoViewport() {
   }, []);
 
   useEffect(() => {
-    if (trackedPlate) {
-      setIsSelectingMode(true);
-      setIsDrawing(false);
-    } else {
-      setIsSelectingMode(false);
-      setIsDrawing(false);
-    }
+    setIsDrawing(false);
   }, [trackedPlate, trackAttempt]);
 
   const handleMouseDown = (e: MouseEvent) => {
@@ -64,7 +59,7 @@ export default function VideoViewport() {
     setIsDrawing(false);
     setIsSelectingMode(false);
 
-    if (!imgRef.current || !containerRef.current || !trackedPlate) return;
+    if (!imgRef.current || !containerRef.current) return;
 
     // To accurately map the coordinates over object-contain image:
     const img = imgRef.current;
@@ -108,7 +103,7 @@ export default function VideoViewport() {
       await fetch('http://localhost:5000/set_target', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plate: trackedPlate, roi: [xmin, ymin, xmax, ymax] }),
+        body: JSON.stringify({ plate: trackedPlate || "UNKNOWN", roi: [xmin, ymin, xmax, ymax] }),
       });
     } catch (err) {
       console.error('Failed to set target on vision node:', err);
@@ -123,17 +118,33 @@ export default function VideoViewport() {
           <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
             [ VIDEO FEED ]
           </span>
+          <button 
+            onClick={() => setIsSelectingMode(!isSelectingMode)}
+            className={`pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded ${isSelectingMode ? 'bg-amber-suspect/20 text-amber-suspect border-amber-suspect' : 'bg-slate-800 text-slate-400 border-slate-700'} border uppercase`}
+          >
+            {isSelectingMode ? 'CANCEL DRAW' : 'DRAW ROI'}
+          </button>
+          <button 
+            onClick={() => fetch('http://localhost:5000/reset_sync', { method: 'POST' }).catch(() => {})}
+            className="pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded bg-slate-800 text-slate-400 border-slate-700 border uppercase hover:bg-slate-700"
+          >
+            RESET LOOP
+          </button>
         </div>
         <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
       </div>
 
-      {/* The MJPEG Stream */}
+      {/* The MJPEG Stream with Robust Auto-Reconnect */}
       <img
         ref={imgRef}
-        src="http://localhost:5000/video_feed"
+        src={`http://localhost:5000/video_feed?t=${videoRetry}`}
         className="w-full h-full object-contain pointer-events-none"
         alt="Camera Feed"
         draggable={false}
+        onError={() => {
+          // If the feed fails (backend booting or model downloading), wait 2s and try again
+          setTimeout(() => setVideoRetry(prev => prev + 1), 2000);
+        }}
       />
 
       {/* Overlay for ROI Dragging */}

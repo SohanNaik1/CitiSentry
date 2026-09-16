@@ -94,26 +94,30 @@ func main() {
 		}
 	}()
 
-	// Spawn the Python Flask server for MJPEG vision
-	pythonExe := "python3"
-	if runtime.GOOS == "windows" {
-		pythonExe = "python"
-	}
-	
-	scriptAbsPath, _ := filepath.Abs("../edge-vision/vision_node.py")
-	videoAbsPath, _ := filepath.Abs("../../web/public/videos/traffic.mp4")
-	
-	visionCmd := exec.Command(pythonExe, scriptAbsPath,
-		"--video", videoAbsPath,
-		"--camera_id", "CAM-001",
-	)
-	visionCmd.Stdout = os.Stdout
-	visionCmd.Stderr = os.Stderr
+	// Spawn the Python Flask server for MJPEG vision (unless running standalone)
+	var visionCmd *exec.Cmd
+	if os.Getenv("STANDALONE_BROKER") != "true" && os.Getenv("SPAWN_VISION") != "false" {
+		pythonExe := "python3"
+		if runtime.GOOS == "windows" {
+			pythonExe = "python"
+		}
+		
+		scriptAbsPath, _ := filepath.Abs("../edge-vision/vision_node.py")
+		videoAbsPath, _ := filepath.Abs("../../web/public/videos/cam001.mp4")
+		
+		visionCmd = exec.Command(pythonExe, scriptAbsPath,
+			"--video", videoAbsPath,
+			"--camera_id", "CAM-001",
+		)
+		visionCmd.Stdout = os.Stdout
+		visionCmd.Stderr = os.Stderr
 
-	if err := visionCmd.Start(); err != nil {
-		log.Fatalf("[FATAL] Failed to start vision node: %v", err)
+		if err := visionCmd.Start(); err != nil {
+			log.Printf("[WARN] Failed to auto-spawn vision node: %v", err)
+		} else {
+			log.Printf("[BOOT] Spawned Python vision node (PID %d)", visionCmd.Process.Pid)
+		}
 	}
-	log.Printf("[BOOT] Spawned Python vision node (PID %d)", visionCmd.Process.Pid)
 
 	// Graceful shutdown: wait for SIGINT or SIGTERM
 	quit := make(chan os.Signal, 1)
@@ -121,7 +125,7 @@ func main() {
 	sig := <-quit
 	log.Printf("[SHUTDOWN] Received signal %v, initiating graceful shutdown...", sig)
 
-	if visionCmd.Process != nil {
+	if visionCmd != nil && visionCmd.Process != nil {
 		log.Printf("[SHUTDOWN] Killing Python vision node (PID %d)...", visionCmd.Process.Pid)
 		visionCmd.Process.Kill()
 	}
