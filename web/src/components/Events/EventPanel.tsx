@@ -62,21 +62,27 @@ export default function EventPanel() {
           telemetryLogs.length === 0 ? (
             <EmptyState label="AWAITING TELEMETRY EVENTS..." />
           ) : (
-            telemetryLogs.map((log, i) => {
-              const conf = log.license_plate.confidence;
-              const statusColor = conf >= 0.85 ? 'text-emerald-600 dark:text-emerald-online' : 'text-amber-600 dark:text-amber-suspect';
-              const statusLabel = conf >= 0.85 ? 'CLEAN' : 'SUSPECT';
+            telemetryLogs.slice(0, 10).map((log, i) => {
+              const isViolation = log.speed_kmh > 60;
+              const badgeClass = isViolation 
+                ? 'text-red-500 bg-red-500/10 border border-red-500/30' 
+                : 'text-emerald-500 bg-emerald-500/10 border border-emerald-500/30';
+              const statusLabel = isViolation ? 'SPEED VIOLATION' : 'NOMINAL';
               return (
                 <div
-                  key={`${log.event_id}-${i}`}
-                  className="grid grid-cols-[120px_80px_1fr_100px_80px_120px] gap-2 px-4 py-3 border-b border-slate-100 dark:border-zinc-800/50 hover:bg-slate-50 dark:hover:bg-zinc-800/40 transition-colors"
+                  key={`${log.camera_id}-${log.timestamp}-${i}`}
+                  className="grid grid-cols-[120px_80px_1fr_100px_80px_140px] gap-2 px-4 py-3 border-b border-zinc-800/50 hover:bg-zinc-800/40 transition-colors items-center"
                 >
-                  <span className="text-sm text-slate-500 dark:text-zinc-500 font-medium">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                  <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium">{log.camera_id}</span>
-                  <span className="text-sm text-cyan-700 dark:text-cyan-telemetry font-bold tracking-wider">{log.license_plate.text}</span>
-                  <span className="text-sm text-slate-600 dark:text-zinc-400 font-medium tracking-wider">{log.system_id || '—'}</span>
-                  <span className="text-sm text-amber-600 dark:text-amber-suspect font-medium">{log.speed_kmh} km/h</span>
-                  <span className={`text-sm font-bold ${statusColor}`}>{statusLabel}</span>
+                  <span className="text-xs text-zinc-500 font-medium font-mono">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                  <span className="text-xs text-zinc-400 font-medium font-mono">{log.camera_id}</span>
+                  <span className="text-xs text-zinc-300 font-bold tracking-wider font-mono">{log.ocr_text || 'UNKNOWN'}</span>
+                  <span className="text-xs text-zinc-400 font-medium tracking-wider font-mono">{log.system_id || '—'}</span>
+                  <span className="text-xs text-zinc-300 font-medium font-mono">{log.speed_kmh?.toFixed(1) || '0.0'} km/h</span>
+                  <div>
+                    <span className={`text-[9px] font-bold px-2 py-0.5 rounded tracking-widest ${badgeClass}`}>
+                      {statusLabel}
+                    </span>
+                  </div>
                 </div>
               );
             })

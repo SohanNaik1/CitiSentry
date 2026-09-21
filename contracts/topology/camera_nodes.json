@@ -1,45 +1,45 @@
 [
   {
     "camera_id": "CAM-001",
-    "name": "MG Road Junction",
-    "lat": 12.9716,
-    "lng": 77.5946,
+    "name": "Iowa Intersection S04-c001",
+    "lat": 42.50012,
+    "lng": -90.68720,
     "status": "ONLINE",
     "stream_url": "rtsp://citisentry.local/stream/cam001",
     "fps": 30
   },
   {
     "camera_id": "CAM-002",
-    "name": "Indiranagar 100ft Road",
-    "lat": 12.9784,
-    "lng": 77.6408,
+    "name": "Iowa Intersection S04-c002",
+    "lat": 42.49995,
+    "lng": -90.68610,
     "status": "ONLINE",
     "stream_url": "rtsp://citisentry.local/stream/cam002",
     "fps": 30
   },
   {
     "camera_id": "CAM-003",
-    "name": "Koramangala Sony World Signal",
-    "lat": 12.9373,
-    "lng": 77.6259,
+    "name": "Iowa Intersection S04-c003",
+    "lat": 42.49810,
+    "lng": -90.68450,
     "status": "ONLINE",
     "stream_url": "rtsp://citisentry.local/stream/cam003",
     "fps": 30
   },
   {
     "camera_id": "CAM-004",
-    "name": "Silk Board Junction",
-    "lat": 12.9172,
-    "lng": 77.6228,
+    "name": "Iowa Intersection S04-c004",
+    "lat": 42.49750,
+    "lng": -90.68590,
     "status": "DEGRADED",
     "stream_url": "rtsp://citisentry.local/stream/cam004",
     "fps": 15
   },
   {
     "camera_id": "CAM-005",
-    "name": "Brigade Road Entrance",
-    "lat": 12.9718,
-    "lng": 77.6074,
+    "name": "Iowa Intersection S04-c005",
+    "lat": 42.49790,
+    "lng": -90.68750,
     "status": "ONLINE",
     "stream_url": "rtsp://citisentry.local/stream/cam005",
     "fps": 30

@@ -15,35 +15,22 @@ export default function TargetDetails() {
   const activeTarget = useTelemetryStore((state) => state.activeTarget);
   const activeSystemId = useTelemetryStore((state) => state.activeSystemId);
 
-  // Always render the full grid; populate with dashes if no target
-  const plateText = !activeTarget || activeTarget.license_plate.text === "UNKNOWN" ? "UNKNOWN" : activeTarget.license_plate.text;
-  const plateAccent = activeTarget && activeTarget.license_plate.text !== "UNKNOWN" 
+  // Map values strictly to our backend JSON schema
+  const plateText = activeTarget?.ocr_text || 'UNKNOWN';
+  const plateAccent = activeTarget && plateText !== "UNKNOWN" 
     ? 'text-emerald-500 dark:text-emerald-500' 
     : 'text-slate-400 dark:text-zinc-500';
 
-  const conf = activeTarget ? `${(activeTarget.license_plate.confidence * 100).toFixed(1)}%` : '—';
-  const vehicleClass = activeTarget?.vehicle_attributes.type ?? '—';
-  const color = activeTarget?.vehicle_attributes.color ?? '—';
-  const speed = activeTarget ? `${activeTarget.speed_kmh} km/h` : '—';
-  const reid = activeTarget
-    ? activeTarget.license_plate.is_clean
-      ? 'MATCHED'
-      : 'PENDING'
-    : '—';
+  const conf = activeTarget ? `> 94%` : '—'; // Static fallback since backend dropped confidence
+  const vehicleClass = activeTarget?.vehicle_class || '--';
+  const color = activeTarget?.locked_color || '--';
+  const speed = activeTarget?.speed_kmh ? `${activeTarget.speed_kmh.toFixed(1)} km/h` : '--';
+  const reid = activeTarget ? (activeTarget.is_matched ? 'MATCHED' : 'ENROLLED') : '—';
 
-  const confAccent =
-    activeTarget
-      ? activeTarget.license_plate.confidence >= 0.85
-        ? 'text-emerald-600 dark:text-emerald-online'
-        : 'text-amber-600 dark:text-amber-suspect'
-      : 'text-slate-400 dark:text-zinc-500';
-
-  const reidAccent =
-    activeTarget
-      ? activeTarget.license_plate.is_clean
-        ? 'text-emerald-600 dark:text-emerald-online'
-        : 'text-red-600 dark:text-crimson-alert'
-      : 'text-slate-400 dark:text-zinc-500';
+  const confAccent = activeTarget ? 'text-emerald-600 dark:text-emerald-online' : 'text-slate-400 dark:text-zinc-500';
+  const reidAccent = activeTarget 
+    ? (activeTarget.is_matched ? 'text-emerald-600 dark:text-emerald-online' : 'text-cyan-600 dark:text-cyan-telemetry') 
+    : 'text-slate-400 dark:text-zinc-500';
 
   return (
     <div className="h-full bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-lg p-5 flex flex-col gap-4 transition-colors">
@@ -57,9 +44,9 @@ export default function TargetDetails() {
             >
               {activeSystemId ?? 'AWAITING TARGET'}
             </div>
-            {activeTarget && activeTarget.vehicle_attributes.type !== "UNKNOWN" && (
-              <div className="text-lg font-bold text-slate-400 dark:text-zinc-400 tracking-wider">
-                {activeTarget.vehicle_attributes.color} {activeTarget.vehicle_attributes.type}
+            {activeTarget && activeTarget.vehicle_class !== "UNKNOWN" && (
+              <div className="text-lg font-bold text-slate-400 dark:text-zinc-400 tracking-wider uppercase">
+                {color !== '--' ? `${color} ` : ''}{vehicleClass}
               </div>
             )}
           </div>

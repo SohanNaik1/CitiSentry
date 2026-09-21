@@ -22,7 +22,7 @@ export default function TelemetryFeed() {
           </div>
         ) : (
           telemetryLogs.map((log, index) => (
-            <TelemetryCard key={`${log.event_id}-${index}`} event={log} />
+            <TelemetryCard key={`${log.camera_id}-${log.timestamp}-${index}`} event={log} />
           ))
         )}
       </div>

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useTelemetryStore } from '../stores/useTelemetryStore';
-import type { TelemetryEvent } from '../types/telemetry';
+import type { TelemetryEvent, AnalyticsSnapshot } from '../types/telemetry';
 
 export type WebSocketStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -23,6 +23,7 @@ export function useWebSocket(url: string): WebSocketStatus {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const addTelemetryEvent = useTelemetryStore((state) => state.addTelemetryEvent);
   const addAlert = useTelemetryStore((state) => state.addAlert);
+  const setAnalyticsData = useTelemetryStore((state) => state.setAnalyticsData);
 
   const connect = useCallback(() => {
     // Guard: only run in the browser
@@ -47,13 +48,19 @@ export function useWebSocket(url: string): WebSocketStatus {
 
     ws.onmessage = (messageEvent: MessageEvent) => {
       try {
-        const event = JSON.parse(messageEvent.data as string);
+        const parsed = JSON.parse(messageEvent.data as string);
 
-        // Dispatch based on event signature
-        if (event.event_id && event.camera_id && event.license_plate) {
-          addTelemetryEvent(event as TelemetryEvent);
-        } else if (event.alert_id && event.alert_type) {
-          addAlert(event);
+        // Dispatch based on message type
+        if (parsed.type === 'ANALYTICS_UPDATE' && parsed.data) {
+          setAnalyticsData(parsed.data as AnalyticsSnapshot);
+        } else if (parsed.type === 'HANDOFF' && parsed.new_camera_id) {
+          // Automatic camera handoff triggered by the Go broker
+          const setActiveCamera = useTelemetryStore.getState().setActiveCamera;
+          setActiveCamera(parsed.new_camera_id);
+        } else if (parsed.camera_id && parsed.ocr_text) {
+          addTelemetryEvent(parsed as TelemetryEvent);
+        } else if (parsed.alert_id && parsed.alert_type) {
+          addAlert(parsed);
         }
       } catch {
         // Silently drop malformed messages
@@ -71,7 +78,7 @@ export function useWebSocket(url: string): WebSocketStatus {
       // WebSocket spec, so reconnect logic is handled there.
       ws.close();
     };
-  }, [url, addTelemetryEvent]);
+  }, [url, addTelemetryEvent, setAnalyticsData]);
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimerRef.current) {

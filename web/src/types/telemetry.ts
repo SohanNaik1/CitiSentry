@@ -21,18 +21,16 @@ export interface VehicleAttributes {
 }
 
 export interface TelemetryEvent {
-  event_id: string;
-  system_id: string;
   camera_id: string;
   timestamp: string;
-  epoch_ms: number;
-  license_plate: LicensePlate;
-  /** Bounding box in [xmin, ymin, xmax, ymax] format, normalized between 0.0 and 1.0 */
-  bounding_box: [number, number, number, number];
-  vehicle_attributes: VehicleAttributes;
+  ocr_text: string;
+  vector?: number[];
   speed_kmh: number;
-  heading_degrees: number;
-  reid_embeddings: number[];
+  vehicle_class: string;
+  system_id?: string;
+  locked_class?: string;
+  locked_color?: string;
+  is_matched?: boolean;
 }
 
 export interface AlertEvent {
@@ -44,3 +42,12 @@ export interface AlertEvent {
   details: string;
   created_at: string;
 }
+
+export interface AnalyticsSnapshot {
+  fleet_composition: Record<string, number>;
+  node_avg_speeds: Record<string, number>;
+  od_flow: Record<string, number>;
+  total_tracked: number;
+  all_time_total?: number;
+}
+

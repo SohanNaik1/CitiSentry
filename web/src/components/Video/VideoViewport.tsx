@@ -8,7 +8,6 @@ export default function VideoViewport() {
   const trackedPlate = useTelemetryStore((state) => state.trackedPlate);
   const trackAttempt = useTelemetryStore((state) => state.trackAttempt);
   const [currentTime, setCurrentTime] = useState('');
-  const [videoRetry, setVideoRetry] = useState(0);
 
   // Update clock every second
   useEffect(() => {
@@ -32,7 +31,13 @@ export default function VideoViewport() {
   }, []);
 
   useEffect(() => {
-    setIsDrawing(false);
+    if (trackedPlate) {
+      setIsSelectingMode(true);
+      setIsDrawing(false);
+    } else {
+      setIsSelectingMode(false);
+      setIsDrawing(false);
+    }
   }, [trackedPlate, trackAttempt]);
 
   const handleMouseDown = (e: MouseEvent) => {
@@ -60,7 +65,7 @@ export default function VideoViewport() {
     setIsDrawing(false);
     setIsSelectingMode(false);
 
-    if (!imgRef.current || !containerRef.current) return;
+    if (!imgRef.current || !containerRef.current || !trackedPlate) return;
 
     // To accurately map the coordinates over object-contain image:
     const img = imgRef.current;
@@ -104,7 +109,7 @@ export default function VideoViewport() {
       await fetch('http://127.0.0.1:5000/set_target', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plate: trackedPlate || "UNKNOWN", roi: [xmin, ymin, xmax, ymax] }),
+        body: JSON.stringify({ plate: trackedPlate, roi: [xmin, ymin, xmax, ymax], system_id: brokerData.system_id }),
       });
     } catch (err) {
       console.error('Failed to set target on vision node:', err);
@@ -112,54 +117,39 @@ export default function VideoViewport() {
   };
 
   return (
-    <div className="relative w-full h-full bg-black rounded overflow-hidden border border-zinc-800 flex flex-col">
-      {/* Main Video Display Area */}
-      <div className="relative flex-1 w-full min-h-0 bg-black overflow-hidden">
+    <div className="flex flex-col w-full h-full rounded overflow-hidden border border-zinc-800">
+      {/* ── Video Feed Area ───────────────────────────────────── */}
+      <div className="relative flex-1 min-h-0 bg-black">
         {/* Top Bar HUD */}
         <div className="absolute top-0 left-0 w-full p-2 flex items-center justify-between z-10 bg-black/60 pointer-events-none">
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold tracking-widest text-emerald-online uppercase">
               [ VIDEO FEED ]
             </span>
-            <button 
-              onClick={() => setIsSelectingMode(!isSelectingMode)}
-              className={`pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded ${isSelectingMode ? 'bg-amber-suspect/20 text-amber-suspect border-amber-suspect' : 'bg-slate-800 text-slate-400 border-slate-700'} border uppercase`}
-            >
-              {isSelectingMode ? 'CANCEL DRAW' : 'DRAW ROI'}
-            </button>
-            <button 
-              onClick={() => fetch('http://localhost:5000/reset_sync', { method: 'POST' }).catch(() => {})}
-              className="pointer-events-auto px-2 py-1 ml-2 text-[10px] font-bold tracking-widest rounded bg-slate-800 text-slate-400 border-slate-700 border uppercase hover:bg-slate-700"
-            >
-              RESET LOOP
-            </button>
           </div>
           <span className="text-[10px] text-zinc-500 font-mono tracking-widest">{currentTime}</span>
         </div>
 
-        {/* The MJPEG Stream with Robust Auto-Reconnect */}
+        {/* The MJPEG Stream */}
         <img
           ref={imgRef}
-          src={`http://localhost:5000/video_feed?t=${videoRetry}`}
+          src="http://127.0.0.1:5000/video_feed"
           className="w-full h-full object-contain pointer-events-none"
           alt="Camera Feed"
           draggable={false}
-          onError={() => {
-            setTimeout(() => setVideoRetry(prev => prev + 1), 2000);
-          }}
         />
 
         {/* Overlay for ROI Dragging */}
         <div
           ref={containerRef}
-          className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair pointer-events-auto' : 'pointer-events-none'}`}
+          className={`absolute inset-0 z-20 ${isSelectingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
         >
           {isDrawing && (
             <div
-              className="absolute border-2 border-cyan-telemetry bg-cyan-telemetry/20"
+              className="absolute border border-cyan-telemetry bg-cyan-telemetry/10"
               style={{
                 left: Math.min(startPos.x, currentPos.x),
                 top: Math.min(startPos.y, currentPos.y),
@@ -168,19 +158,17 @@ export default function VideoViewport() {
               }}
             />
           )}
-
-          {isSelectingMode && !isDrawing && (
-            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
-              DRAW ROI OVER TARGET
-            </div>
-          )}
         </div>
+
+        {isSelectingMode && !isDrawing && (
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-cyan-telemetry text-[10px] font-bold bg-black/80 px-4 py-2 border border-cyan-telemetry/30 rounded pointer-events-none uppercase tracking-widest z-30 animate-pulse">
+            DRAW ROI OVER TARGET
+          </div>
+        )}
       </div>
 
       {/* ── DVR Tactical Scrubber ─────────────────────────────── */}
-      <div className="flex-shrink-0 z-20">
-        <DVRControls />
-      </div>
+      <DVRControls />
     </div>
   );
 }

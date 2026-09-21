@@ -20,7 +20,7 @@ trap cleanup EXIT INT TERM
 # 1. Start Go Core Broker (Port 8080)
 echo "[CitiSentry] Starting Core Broker (Go) on port 8080..."
 cd services/core-broker
-STANDALONE_BROKER=true go run cmd/server/*.go &
+go run cmd/server/*.go &
 cd ../..
 
 # Give Go broker 2 seconds to bind port 8080 before starting others

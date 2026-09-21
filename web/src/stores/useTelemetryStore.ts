@@ -1,5 +1,7 @@
 import { create } from 'zustand'
-import { TelemetryEvent, AlertEvent } from '../types/telemetry'
+import { TelemetryEvent, AlertEvent, AnalyticsSnapshot } from '../types/telemetry'
+
+type AppMode = 'TACTICAL' | 'STRATEGIC';
 
 interface TelemetryState {
   activeCameraId: string | null;
@@ -9,7 +11,9 @@ interface TelemetryState {
   trackedPlate: string | null;
   trackAttempt: number;
   activeSystemId: string | null;
-  activeTrajectory: string[];
+  appMode: AppMode;
+  analyticsData: AnalyticsSnapshot | null;
+  fluxHistory: Array<{ time: string, total: number, congested: number }>;
   
   setActiveCamera: (id: string) => void;
   setActiveTarget: (target: TelemetryEvent | null) => void;
@@ -19,6 +23,8 @@ interface TelemetryState {
   setActiveSystemId: (id: string | null) => void;
   incrementTrackAttempt: () => void;
   clearState: () => void;
+  setAppMode: (mode: AppMode) => void;
+  setAnalyticsData: (data: AnalyticsSnapshot) => void;
 }
 
 export const useTelemetryStore = create<TelemetryState>()((set) => ({
@@ -29,18 +35,40 @@ export const useTelemetryStore = create<TelemetryState>()((set) => ({
   trackedPlate: null,
   trackAttempt: 0,
   activeSystemId: null,
-  activeTrajectory: [],
+  appMode: 'TACTICAL',
+  analyticsData: null,
+  fluxHistory: [],
 
   setActiveCamera: (id: string) => set({ activeCameraId: id }),
   setActiveTarget: (target: TelemetryEvent | null) => set({ activeTarget: target }),
   setTrackedPlate: (plate: string | null) => set({ trackedPlate: plate }),
   setActiveSystemId: (id: string | null) => set({ activeSystemId: id }),
   incrementTrackAttempt: () => set((state) => ({ trackAttempt: state.trackAttempt + 1 })),
+  setAppMode: (mode: AppMode) => set({ appMode: mode }),
+  setAnalyticsData: (data: AnalyticsSnapshot) => set((state) => {
+    let currentTotal = Object.values(data.fleet_composition || {}).reduce((sum, val) => sum + val, 0);
+    currentTotal = Math.round(currentTotal / 30);
+    
+    // Calculate congested vehicles by finding ratio of actively congested nodes (speed < 15 and speed > 0)
+    const nodeSpeeds = Object.values(data.node_avg_speeds || {});
+    const congestedNodes = nodeSpeeds.filter(speed => speed > 0 && speed < 15.0).length;
+    const congestedRatio = nodeSpeeds.length > 0 ? (congestedNodes / nodeSpeeds.length) : 0;
+    const currentCongested = Math.round(currentTotal * congestedRatio);
+
+    const newPoint = {
+      time: new Date().toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }),
+      total: currentTotal,
+      congested: currentCongested
+    };
+    return {
+      analyticsData: data,
+      fluxHistory: [...state.fluxHistory, newPoint].slice(-20)
+    };
+  }),
 
   clearState: () => set((state) => ({
     activeTarget: null,
     trackedPlate: null,
-    activeTrajectory: [],
     // explicitly NOT resetting activeCameraId or telemetryLogs so data stays active
   })),
 
@@ -51,47 +79,26 @@ export const useTelemetryStore = create<TelemetryState>()((set) => ({
       
       let nextActiveSystemId = state.activeSystemId;
       
-      let nextActiveCameraId = state.activeCameraId;
-      let nextTrajectory = state.activeTrajectory;
-
-      if (state.trackedPlate === "UNKNOWN" || state.trackedPlate === event.license_plate.text) {
-        nextTrackedPlate = event.license_plate.text;
+      // If we initiated a track on an UNKNOWN plate and the backend locked it,
+      // or if it matches the plate we are currently tracking, update the target!
+      if (state.trackedPlate === "UNKNOWN" || state.trackedPlate === event.ocr_text) {
+        nextTrackedPlate = event.ocr_text;
         nextActiveTarget = event;
         if (event.system_id) {
-          if (state.activeSystemId !== event.system_id) {
-            nextActiveSystemId = event.system_id;
-            nextTrajectory = [event.camera_id]; // Reset trajectory for new system
-          } else {
-            // Append camera to trajectory if it's new or moving to a different one
-            if (nextTrajectory.length === 0 || nextTrajectory[nextTrajectory.length - 1] !== event.camera_id) {
-               if (!nextTrajectory.includes(event.camera_id)) {
-                  nextTrajectory = [...nextTrajectory, event.camera_id];
-               }
-            }
-          }
-        }
-        // AUTOMATIC CAMERA SWITCHING:
-        // If the target moved to a new camera, switch the active camera automatically!
-        if (event.camera_id !== state.activeCameraId) {
-          nextActiveCameraId = event.camera_id;
+          nextActiveSystemId = event.system_id;
         }
       }
 
       const existingIdx = state.telemetryLogs.findIndex(l => l.system_id === event.system_id && l.camera_id === event.camera_id);
       if (existingIdx !== -1) {
         const newLogs = [...state.telemetryLogs];
-        const existingEvent = newLogs[existingIdx];
-        newLogs[existingIdx] = { 
-          ...event, 
-          timestamp: existingEvent.timestamp, 
-          epoch_ms: existingEvent.epoch_ms 
-        }; // Overwrite but preserve initial timestamp to prevent map path fluctuation
-        return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate, activeSystemId: nextActiveSystemId, activeCameraId: nextActiveCameraId, activeTrajectory: nextTrajectory };
+        newLogs[existingIdx] = event; // Overwrite for the SAME camera to prevent spam
+        return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate, activeSystemId: nextActiveSystemId };
       }
       
       // Keep max 100 events to prevent memory leaks
       const newLogs = [event, ...state.telemetryLogs].slice(0, 100);
-      return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate, activeSystemId: nextActiveSystemId, activeCameraId: nextActiveCameraId, activeTrajectory: nextTrajectory };
+      return { telemetryLogs: newLogs, activeTarget: nextActiveTarget, trackedPlate: nextTrackedPlate, activeSystemId: nextActiveSystemId };
     }),
 
   addAlert: (alert: AlertEvent) =>

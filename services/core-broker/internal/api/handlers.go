@@ -1,209 +1,291 @@
 package api
 
 import (
-	"citisentry-broker/internal/engine"
-	"citisentry-broker/internal/store"
-	"citisentry-broker/internal/ws"
-	"citisentry-broker/pkg/models"
+	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"strconv"
-	"crypto/rand"
 	"strings"
+	"sync"
+	"time"
+
+	"citisentry-broker/internal/analytics"
+	"citisentry-broker/internal/store"
+	"citisentry-broker/internal/ws"
 )
 
-// APIHandler holds references to shared application state and provides
-// HTTP handler methods for the broker's REST API surface.
+// vehicleSighting tracks the last time+camera a vehicle was seen (for overlap debounce)
+type vehicleSighting struct {
+	CameraID string
+	SeenAt   time.Time
+}
+
+// cameraAdjacency maps source camera -> list of neighboring destination cameras
+var cameraAdjacency = map[string][]string{
+	"CAM-001": {"CAM-005", "CAM-002"},
+	"CAM-002": {"CAM-003"},
+	"CAM-003": {"CAM-002", "CAM-004"},
+	"CAM-004": {"CAM-003"},
+	"CAM-005": {"CAM-001"},
+}
+
+// cameraVideoFiles maps camera_id -> relative video path for handoff
+var cameraVideoFiles = map[string]string{
+	"CAM-001": "test_video.mp4",
+	"CAM-002": "../../web/public/videos/cam002.mp4",
+	"CAM-003": "../../web/public/videos/cam003.mp4",
+	"CAM-004": "../../web/public/videos/cam004.mp4",
+	"CAM-005": "../../web/public/videos/cam005.mp4",
+}
+
+// GetNextCamera returns the first neighboring camera for handoff, or "" if none
+func GetNextCamera(cameraID string) string {
+	neighbors, ok := cameraAdjacency[cameraID]
+	if ok && len(neighbors) > 0 {
+		return neighbors[0]
+	}
+	// Dynamic fallback for AICity22 dataset (CAM-016 to CAM-040)
+	if strings.HasPrefix(cameraID, "CAM-0") {
+		var num int
+		if _, err := fmt.Sscanf(cameraID, "CAM-%03d", &num); err == nil {
+			if num >= 16 && num < 40 {
+				return fmt.Sprintf("CAM-%03d", num+1)
+			}
+		}
+	}
+	return ""
+}
+
 type APIHandler struct {
-	Store               *store.TelemetryStore
-	Hub                 *ws.Hub
-	Registry            *engine.SpatialRegistry
+	Hub         *ws.Hub
+	VectorStore *store.VectorStore
+	Analytics   *analytics.Engine
+
+	// Overlap debounce: tracks last sighting per system_id
+	sightingsMu sync.Mutex
+	sightings   map[string]*vehicleSighting
 }
 
-// NewAPIHandler creates a new APIHandler wired to the given TelemetryStore,
-// WebSocket Hub, and SpatialRegistry for real-time anomaly detection.
-func NewAPIHandler(s *store.TelemetryStore, hub *ws.Hub, registry *engine.SpatialRegistry) *APIHandler {
-	return &APIHandler{Store: s, Hub: hub, Registry: registry}
+type TelemetryPayload struct {
+	CameraID     string    `json:"camera_id"`
+	Timestamp    string    `json:"timestamp"`
+	OCRText      string    `json:"ocr_text"`
+	Vector       []float64 `json:"vector"`
+	SpeedKmh     float64   `json:"speed_kmh"`
+	VehicleClass string    `json:"vehicle_class"`
+	LockedColor  string    `json:"locked_color"`
+	SystemID     string    `json:"system_id,omitempty"`
+	IsMatched    bool      `json:"is_matched"`
+	Status       string    `json:"status,omitempty"`
 }
 
-// StartTracking handles POST /api/v1/track/start.
-// It generates a short, random alphanumeric ID (e.g. TRK-4F8A) to serve as the
-// primary identifier for a tracked vehicle.
-func (h *APIHandler) StartTracking(w http.ResponseWriter, r *http.Request) {
+func generateSystemID() string {
+	b := make([]byte, 2)
+	rand.Read(b)
+	return "TRK-" + hex.EncodeToString(b)
+}
+
+func NewAPIHandler(hub *ws.Hub, vectorStore *store.VectorStore, analyticsEngine *analytics.Engine) *APIHandler {
+	return &APIHandler{
+		Hub:         hub,
+		VectorStore: vectorStore,
+		Analytics:   analyticsEngine,
+		sightings:   make(map[string]*vehicleSighting),
+	}
+}
+
+// StartTrack generates a new system ID for manual tracking initiated from the UI
+func (h *APIHandler) StartTrack(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	bytes := make([]byte, 2)
-	if _, err := rand.Read(bytes); err != nil {
-		http.Error(w, `{"error":"failed to generate id"}`, http.StatusInternalServerError)
-		return
-	}
-	systemID := "TRK-" + strings.ToUpper(hex.EncodeToString(bytes))
-
+	// For manual UI tracking, we just generate an ID. The frontend will pass this
+	// ID to the vision node, which will then send telemetry with it.
+	newID := generateSystemID()
+	
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	resp := map[string]string{
-		"status":    "started",
-		"system_id": systemID,
-	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("[ERROR] Failed to encode response: %v", err)
-	}
+	json.NewEncoder(w).Encode(map[string]string{
+		"system_id": newID,
+	})
 }
 
-// IngestTelemetry handles POST /api/v1/telemetry.
-// It reads the full request body, unmarshals it into a TelemetryEvent using
-// the canonical parser from pkg/models, runs the spatiotemporal anomaly
-// detection engine against prior events for the same plate, persists the
-// event in the in-memory store, broadcasts it (and any alerts) to all
-// connected WebSocket clients, and returns 201 Created with the event_id.
 func (h *APIHandler) IngestTelemetry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	payloadBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("[ERROR] Failed to read request body: %v", err)
-		http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadRequest)
+		log.Printf("Error reading body: %v", err)
+		http.Error(w, "Can't read body", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 
-	event, err := models.ParseTelemetryEvent(body)
-	if err != nil {
-		log.Printf("[ERROR] Failed to parse telemetry event: %v", err)
-		http.Error(w, `{"error":"invalid telemetry payload"}`, http.StatusBadRequest)
+	var payload TelemetryPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		log.Printf("Error unmarshaling payload: %v", err)
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	if event.EventID == "" || event.CameraID == "" {
-		http.Error(w, `{"error":"missing required fields: event_id, camera_id"}`, http.StatusBadRequest)
-		return
-	}
+	// ── HANDOFF TRIGGER ──────────────────────────────────────────────
+	// If the vision node reports TARGET_LOST, initiate automatic handoff
+	if payload.Status == "TARGET_LOST" && payload.SystemID != "" {
+		nextCam := GetNextCamera(payload.CameraID)
+		if nextCam != "" {
+			log.Printf("[HANDOFF] Target %s lost on %s. Handing off to %s", payload.SystemID, payload.CameraID, nextCam)
 
-	log.Printf("[INGEST] Event %s | Plate %s | Camera %s | Speed %.1f km/h",
-		event.EventID, event.LicensePlate.Text, event.CameraID, event.SpeedKMH)
+			systemID := payload.SystemID
+			go func() {
+				time.Sleep(500 * time.Millisecond)
 
-	// === ANOMALY DETECTION ENGINE ===
-	// Before persisting the new event, check if the same plate was seen recently.
-	// If the previous detection was at a different camera, run the spatiotemporal
-	// check to determine if the travel time violates physical constraints.
-	if event.LicensePlate.Text != "" && h.Registry != nil {
-		lastEvent, found := h.Store.GetLatestEventForPlate(event.LicensePlate.Text, event.EventID)
-		if found {
-			alert := engine.CheckForAnomalies(*event, lastEvent, h.Registry)
-			if alert != nil {
-				log.Printf("[ALERT] *** %s *** Plate: %s | Severity: %s | %s",
-					alert.AlertType, alert.TargetPlate, alert.Severity, alert.Details)
-
-				// Broadcast the alert to all connected WebSocket clients immediately
-				alertJSON, err := json.Marshal(alert)
-				if err != nil {
-					log.Printf("[ERROR] Failed to marshal alert for broadcast: %v", err)
-				} else {
-					h.Hub.Broadcast <- alertJSON
-					log.Printf("[BROADCAST] Alert %s pushed to %d WebSocket client(s)",
-						alert.AlertID, h.Hub.ClientCount())
+				// Determine video path for the next camera
+				videoPath, ok := cameraVideoFiles[nextCam]
+				if !ok {
+					// Fallback check for AICity22
+					var num int
+					if _, err := fmt.Sscanf(nextCam, "CAM-%03d", &num); err == nil && num >= 16 {
+						videoPath = fmt.Sprintf("../../web/public/videos/AICity22/S04/c%03d.avi", num)
+					} else {
+						videoPath = fmt.Sprintf("../../web/public/videos/%s.mp4", strings.ToLower(nextCam))
+					}
 				}
+
+				// Tell Python to switch camera and auto-lock the target
+				switchPayload, _ := json.Marshal(map[string]string{
+					"camera_id":        nextCam,
+					"video_path":       videoPath,
+					"target_system_id": systemID,
+				})
+				resp, err := http.Post("http://127.0.0.1:5000/switch_camera", "application/json", bytes.NewReader(switchPayload))
+				if err != nil {
+					log.Printf("[HANDOFF] Failed to POST /switch_camera: %v", err)
+					return
+				}
+				resp.Body.Close()
+
+				// Broadcast HANDOFF event to all WebSocket clients
+				handoffMsg, _ := json.Marshal(map[string]string{
+					"type":          "HANDOFF",
+					"new_camera_id": nextCam,
+				})
+				h.Hub.Broadcast <- handoffMsg
+				log.Printf("[HANDOFF] Successfully handed off to %s", nextCam)
+			}()
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"status":"handoff_initiated"}`))
+		return
+	}
+
+	// ── OVERLAP DEBOUNCE ─────────────────────────────────────────────
+	// If a vehicle's CameraID changes but the time since last detection is < 3s,
+	// it's an FOV overlap — skip anomaly checks, just update the camera.
+	if payload.SystemID != "" {
+		h.sightingsMu.Lock()
+		last, exists := h.sightings[payload.SystemID]
+		now := time.Now()
+		if exists && last.CameraID != payload.CameraID && now.Sub(last.SeenAt) < 3*time.Second {
+			// FOV overlap detected — just update sighting and skip anomaly checks
+			last.CameraID = payload.CameraID
+			last.SeenAt = now
+			h.sightingsMu.Unlock()
+			log.Printf("[DEBOUNCE] FOV overlap for %s (%s -> %s), skipping anomaly check", payload.SystemID, last.CameraID, payload.CameraID)
+
+			// Still feed analytics and broadcast
+			h.Analytics.Update(analytics.TelemetryEvent{
+				SystemID: payload.SystemID,
+				CameraID: payload.CameraID,
+				Class:    payload.VehicleClass,
+				SpeedKmh: payload.SpeedKmh,
+			})
+			enrichedBytes, _ := json.Marshal(payload)
+			h.Hub.Broadcast <- enrichedBytes
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"status":"debounced"}`))
+			return
+		}
+		// Update or create sighting
+		if exists {
+			last.CameraID = payload.CameraID
+			last.SeenAt = now
+		} else {
+			h.sightings[payload.SystemID] = &vehicleSighting{
+				CameraID: payload.CameraID,
+				SeenAt:   now,
 			}
 		}
+		h.sightingsMu.Unlock()
 	}
 
-	// Persist event in the in-memory store (AFTER anomaly check so the check
-	// compares against the previous event, not the one being ingested)
-	h.Store.AddEvent(*event)
+	if len(payload.Vector) > 0 {
+		// Run vector similarity search across all historical vectors
+		matchID, score := h.VectorStore.FindMatch(payload.Vector, 0.85)
 
-	// Broadcast the telemetry event to all connected WebSocket clients in real-time.
-	// Re-marshal the parsed event to ensure clean, validated JSON is sent
-	// to frontends rather than forwarding raw unvalidated bytes.
-	eventJSON, err := json.Marshal(event)
+		if matchID != "" && matchID != payload.SystemID {
+			// A match was found, AND it belongs to a historical track!
+			// The Python node generated a local ID, but the Broker knows its true Global ID.
+			payload.SystemID = matchID
+			payload.IsMatched = true
+			log.Printf("[C2] Match Found! Translating local ID to Global ID: %s | Cosine Score: %.3f", matchID, score)
+			// Save updated vector under the true Global ID
+			h.VectorStore.SaveVector(matchID, payload.Vector)
+		} else {
+			// No historical match found (or it matched itself). Keep the local SystemID.
+			if payload.SystemID == "" {
+				payload.SystemID = generateSystemID()
+			}
+			payload.IsMatched = false
+			// Save the vector to keep the database fresh
+			h.VectorStore.SaveVector(payload.SystemID, payload.Vector)
+			
+			if matchID == "" {
+				log.Printf("[C2] New Target Enrolled! Assigned Global ID: %s", payload.SystemID)
+			}
+		}
+	} else {
+		if payload.SystemID == "" {
+			payload.SystemID = "UNKNOWN"
+		}
+		payload.IsMatched = false
+	}
+
+	// Feed the Analytics Engine
+	h.Analytics.Update(analytics.TelemetryEvent{
+		SystemID: payload.SystemID,
+		CameraID: payload.CameraID,
+		Class:    payload.VehicleClass,
+		SpeedKmh: payload.SpeedKmh,
+	})
+
+	// Marshal back to JSON to broadcast
+	enrichedBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[ERROR] Failed to marshal event for broadcast: %v", err)
-	} else {
-		h.Hub.Broadcast <- eventJSON
-		log.Printf("[BROADCAST] Event %s pushed to %d WebSocket client(s)",
-			event.EventID, h.Hub.ClientCount())
+		log.Printf("Error marshaling enriched payload: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	// Push enriched payload to Hub
+	h.Hub.Broadcast <- enrichedBytes
+
 	w.WriteHeader(http.StatusCreated)
-
-	resp := map[string]string{
-		"status":   "accepted",
-		"event_id": event.EventID,
-	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("[ERROR] Failed to encode response: %v", err)
-	}
+	w.Write([]byte(`{"status":"success"}`))
 }
-
-// QueryTelemetry handles GET /api/v1/telemetry.
-// It supports optional query parameters for forensic filtering:
-//   - camera_id: filter by specific camera node
-//   - start_time: epoch_ms lower bound (inclusive)
-//   - end_time: epoch_ms upper bound (inclusive)
-//
-// If no parameters are provided, all stored events are returned.
-func (h *APIHandler) QueryTelemetry(w http.ResponseWriter, r *http.Request) {
-	cameraID := r.URL.Query().Get("camera_id")
-	startTimeStr := r.URL.Query().Get("start_time")
-	endTimeStr := r.URL.Query().Get("end_time")
-
-	var startTime, endTime int64
-	var err error
-
-	if startTimeStr != "" {
-		startTime, err = strconv.ParseInt(startTimeStr, 10, 64)
-		if err != nil {
-			http.Error(w, `{"error":"invalid start_time parameter"}`, http.StatusBadRequest)
-			return
-		}
-	}
-
-	if endTimeStr != "" {
-		endTime, err = strconv.ParseInt(endTimeStr, 10, 64)
-		if err != nil {
-			http.Error(w, `{"error":"invalid end_time parameter"}`, http.StatusBadRequest)
-			return
-		}
-	}
-
-	var events []models.TelemetryEvent
-	if cameraID == "" && startTime == 0 && endTime == 0 {
-		events = h.Store.GetAllEvents()
-	} else {
-		events = h.Store.QueryEvents(cameraID, startTime, endTime)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(events); err != nil {
-		log.Printf("[ERROR] Failed to encode query response: %v", err)
-	}
-}
-
-// HealthCheck handles GET /api/v1/health.
-// Returns the broker's operational status, event count, and connected
-// WebSocket client count for monitoring.
-func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	resp := map[string]interface{}{
-		"status":      "operational",
-		"event_count": h.Store.EventCount(),
-		"ws_clients":  h.Hub.ClientCount(),
-	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("[ERROR] Failed to encode health response: %v", err)
-	}
-}
-

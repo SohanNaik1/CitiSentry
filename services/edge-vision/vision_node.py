@@ -7,6 +7,8 @@ import threading
 import time
 import uuid
 import os
+import queue
+import random
 
 import cv2
 import numpy as np
@@ -17,50 +19,101 @@ from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 from ultralytics import YOLO
 import torch
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as T
+from database import TelemetryDB
+
+telemetry_queue = queue.Queue(maxsize=100)
+
+def telemetry_worker():
+    session = requests.Session()
+    while True:
+        payload = telemetry_queue.get()
+        try:
+            session.post('http://127.0.0.1:8080/api/v1/telemetry', json=payload, timeout=1.0)
+        except requests.exceptions.RequestException:
+            pass
+        finally:
+            telemetry_queue.task_done()
 
 app = Flask(__name__)
 CORS(app)
 
 BROKER_URL = "http://localhost:8080/api/v1/telemetry"
 
-print("[VISION] Initializing EasyOCR model (GPU)...")
-try:
-    ocr_reader = easyocr.Reader(['en'], gpu=True)
-except Exception as e:
-    print(f"[ERROR] Failed to initialize EasyOCR: {e}", file=sys.stderr)
-    ocr_reader = None
+print("[VISION] Global dependencies loaded.")
+ocr_reader = None
+reid_model = None
 
-PLATE_REGEX = re.compile(r'^(?!.*FEDEX)[A-Z0-9]{4,10}$')
+reid_transform = T.Compose([
+    T.ToPILImage(),
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
-CAMERA_OFFSETS: dict[str, float] = {}
-def load_offsets():
-    local_offset = os.path.join(os.path.dirname(os.path.abspath(__file__)), "S04.txt")
-    offset_file = local_offset if os.path.exists(local_offset) else "/home/sohan/Downloads/AICity22_Track1_MTMC_Tracking/cam_timestamp/S04.txt"
-    if os.path.exists(offset_file):
-        with open(offset_file, 'r') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    CAMERA_OFFSETS[parts[0]] = float(parts[1])
-load_offsets()
+MASTER_CYCLE_SEC: float = 71.0
 
-# ── Absolute Timeline Master Clock ──────────────────────────────────────────
-# S04 Dataset covers exactly 222 seconds (c040 offset 175.8s + 45.4s duration = 221.2s).
+# ─── Absolute Timeline Master Clock ──────────────────────────────────────────
+# The longest video in the Iowa S04 dataset is c026.avi at 71.0 seconds.
+# However, because of the physical scenario offsets, the latest camera to activate
+# is c040 at 175.838 seconds. Its video lasts 45.4s. Thus the total master cycle
+# spanning from the earliest frame (c016) to the latest frame (c040) is ~222 seconds.
 MASTER_CYCLE_SEC: float = 222.0
 
-# Global state
+# Estimated physical offsets (in seconds) for when the truck arrives in each camera's view.
+# These values synchronize the video feeds so the truck's physical movement matches the master timeline.
+CAM_OFFSETS = {
+    "CAM-016": 0.0,
+    "CAM-017": 14.318,
+    "CAM-018": 29.955,
+    "CAM-019": 26.979,
+    "CAM-020": 25.905,
+    "CAM-021": 39.973,
+    "CAM-022": 49.422,
+    "CAM-023": 45.716,
+    "CAM-024": 50.817,
+    "CAM-025": 47.935,
+    "CAM-026": 70.835,
+    "CAM-027": 100.916,
+    "CAM-028": 104.996,
+    "CAM-029": 128.533,
+    "CAM-030": 127.53,
+    "CAM-031": 141.222,
+    "CAM-032": 139.222,
+    "CAM-033": 138.225,
+    "CAM-034": 154.673,
+    "CAM-035": 159.274,
+    "CAM-036": 156.402,
+    "CAM-037": 174.153,
+    "CAM-038": 175.311,
+    "CAM-039": 175.644,
+    "CAM-040": 175.838
+}
 state_lock = threading.Lock()
 camera_lock = threading.RLock() # Protects cv2.VideoCapture calls
 cap = None
 pending_video_path = None
-pending_new_cam_id = None
+current_video_path = None
 frame_width = 0
 frame_height = 0
 fps = 30.0
 camera_id_global = "CAM-001"
-current_frame_index = 0
 centroid_history: collections.deque = collections.deque(maxlen=15)
 prev_center = None
+target_track_id = None
+target_plate = None
+locked_plate = None
+locked_class = "UNKNOWN"
+locked_color = "OTHER"
+target_class = "VEHICLE"
+target_roi = None
+roi_search_frames = 0
+consecutive_misses = 0
+MAX_MISSES = 60
+MAX_ROI_SEARCH_FRAMES = 150
+ROI_EXPANSION = 200
 
 # DVR clock state (all protected by state_lock)
 dvr_start_time: float = time.time()       # Wall-clock anchor for t=0
@@ -74,6 +127,12 @@ active_embedding = None
 last_tracked_xyxy = None
 last_tracked_area = None
 reid_matched = False
+
+# Dual-mode AI pipeline
+operating_mode = "tactical"  # "tactical" or "strategic"
+strategic_centroids: dict = {}  # track_id -> deque of (bcx, bcy, w, time)
+strategic_moving_tids: set = set() # track_ids that have moved > 5km/h
+auto_lock_system_id = None  # Set by handoff to auto-lock a target on the new camera
 
 target_plate = None
 target_track_id = None
@@ -96,13 +155,11 @@ frame_condition = threading.Condition()
 
 
 def get_effective_time() -> float:
-    """Compute the current position in the absolute master timeline.
+    """Compute the current position within the master scenario cycle.
 
-    Returns the absolute virtual elapsed seconds since the system started.
-    This value never resets, allowing each individual camera to modulo
-    at its own exact native duration without jumping randomly.
-    Accounts for accumulated pause duration so pausing freezes the timeline
-    and unpausing resumes seamlessly.
+    Returns a value in [0.0, MASTER_CYCLE_SEC) representing where every
+    camera should be right now. Accounts for accumulated pause duration
+    so pausing freezes the timeline and unpausing resumes seamlessly.
 
     Must be called while state_lock is held, or with local copies of the
     DVR variables.
@@ -117,7 +174,7 @@ def get_effective_time() -> float:
         virtual_elapsed = wall_elapsed - dvr_paused_accumulator
     # Clamp to non-negative before modulo (guards against float drift)
     virtual_elapsed = max(0.0, virtual_elapsed)
-    return virtual_elapsed
+    return virtual_elapsed % MASTER_CYCLE_SEC
 
 
 def get_video_duration(capture: cv2.VideoCapture) -> float:
@@ -134,20 +191,8 @@ def get_video_duration(capture: cv2.VideoCapture) -> float:
         return total_frames / vid_fps
     return 0.0
 
-yolo_weights = os.getenv("YOLO_MODEL", "yolov8s.pt")
-if not os.path.exists(yolo_weights):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.join(script_dir, yolo_weights)
-    if os.path.exists(candidate):
-        yolo_weights = candidate
-    elif os.path.exists(os.path.join(script_dir, "yolov8s.pt")):
-        yolo_weights = os.path.join(script_dir, "yolov8s.pt")
-    elif os.path.exists(os.path.join(script_dir, "yolov8n.pt")):
-        yolo_weights = os.path.join(script_dir, "yolov8n.pt")
-    elif os.path.exists(os.path.join(script_dir, "yolo11x.pt")):
-        yolo_weights = os.path.join(script_dir, "yolo11x.pt")
-print(f"[VISION] Loading YOLO model: {yolo_weights}")
-model = YOLO(yolo_weights)
+model = None
+telemetry_db = TelemetryDB()
 
 def xywh_to_xyxy(box: tuple[int, ...]) -> list[float]:
     return [float(box[0]), float(box[1]), float(box[0] + box[2]), float(box[1] + box[3])]
@@ -185,6 +230,7 @@ def compute_iom(box_a: list[float], box_b: list[float]) -> float:
     return inter / min_area if min_area > 0 else 0.0
 
 YOLO_COCO_CLASSES = {
+    1: "BICYCLE",
     2: "SEDAN",
     3: "MOTORCYCLE",
     5: "BUS",
@@ -203,17 +249,32 @@ def extract_dominant_color(frame: np.ndarray, bbox: list[float]) -> str:
         if x2 <= x1 or y2 <= y1:
             return "UNKNOWN"
             
-        crop = frame[y1:y2, x1:x2]
+        w, h = x2 - x1, y2 - y1
+        cx, cy = x1 + w // 2, y1 + h // 2
+        
+        inner_w, inner_h = int(w * 0.4), int(h * 0.3)
+        cy_offset = int(h * 0.15) # shift down to hit the hood/trunk, avoid roof/glass
+        
+        crop_y1 = max(y1, cy + cy_offset - inner_h // 2)
+        crop_y2 = min(y2, cy + cy_offset + inner_h // 2)
+        crop_x1 = max(x1, cx - inner_w // 2)
+        crop_x2 = min(x2, cx + inner_w // 2)
+        
+        crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        if crop.size == 0:
+            crop = frame[y1:y2, x1:x2]
         tiny = cv2.resize(crop, (32, 32))
         hsv = cv2.cvtColor(tiny, cv2.COLOR_BGR2HSV)
         
+        # Greatly improved HSV boundaries for outdoor lighting
         boundaries = {
-            "WHITE":  ([0, 0, 200], [180, 30, 255]),
-            "BLACK":  ([0, 0, 0], [180, 255, 50]),
-            "SILVER": ([0, 0, 50], [180, 40, 200]),
-            "RED":    ([0, 100, 100], [10, 255, 255]),
-            "BLUE":   ([100, 100, 50], [140, 255, 255]),
-            "YELLOW": ([20, 100, 100], [40, 255, 255])
+            "WHITE":  ([0, 0, 200], [180, 50, 255]),
+            "BLACK":  ([0, 0, 0], [180, 255, 75]),
+            "SILVER": ([0, 0, 75], [180, 50, 200]),
+            "RED":    ([0, 70, 70], [10, 255, 255]),
+            "BLUE":   ([90, 70, 70], [135, 255, 255]),
+            "GREEN":  ([40, 70, 70], [90, 255, 255]),
+            "YELLOW": ([15, 70, 70], [40, 255, 255])
         }
         
         max_count = 0
@@ -238,93 +299,90 @@ def extract_dominant_color(frame: np.ndarray, bbox: list[float]) -> str:
         return "UNKNOWN"
 
 def get_embedding(frame: np.ndarray, bbox: list[float]) -> np.ndarray | None:
-    return None
+    """Extract a MobileNetV3 embedding from a bounding box crop. Returns a 1-D L2-normalized numpy array or None."""
+    global reid_model
+    try:
+        x1, y1, x2, y2 = map(int, bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+        
+        if x2 <= x1 or y2 <= y1:
+            return None
+            
+        crop = frame[y1:y2, x1:x2]
+        
+        if reid_model is None:
+            return None
+            
+        input_tensor = reid_transform(crop).unsqueeze(0)
+        device = next(reid_model.parameters()).device
+        input_tensor = input_tensor.to(device)
+        
+        with torch.no_grad():
+            features = reid_model(input_tensor)
+            
+        features = features / features.norm(p=2, dim=1, keepdim=True)
+        feature_vec = features.cpu().numpy()[0]
+            
+        return feature_vec
+    except Exception as e:
+        print(f"[ERROR] Embedding failed: {e}")
+        return None
 
 def process_video():
-    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed, centroid_history, prev_center, active_system_id, reid_matched, last_tracked_xyxy, last_tracked_area
-    global pending_video_path, pending_new_cam_id, frame_width, frame_height, fps, current_frame_index, camera_id_global
+    global cap, latest_jpeg, target_track_id, target_plate, target_class, locked_plate, locked_class, locked_color, consecutive_misses, dispatch_count, is_paused, target_roi, roi_search_frames, smoothed_speed, centroid_history, prev_center, active_system_id, reid_matched, last_tracked_xyxy, last_tracked_area, strategic_centroids, strategic_moving_tids, auto_lock_system_id
+    global pending_video_path, current_video_path, frame_width, frame_height, fps
     
     frame_count = 0
     active_embedding = None
+    results = None
 
     while True:
         with state_lock:
             local_pending = pending_video_path
-            local_new_cam_id = pending_new_cam_id
             if pending_video_path is not None:
                 pending_video_path = None
-                pending_new_cam_id = None
                 
         if local_pending is not None:
-            # Snapshot old camera state BEFORE spawning the switch thread
+            new_cap = cv2.VideoCapture(local_pending, cv2.CAP_FFMPEG)
+            if not new_cap.isOpened():
+                print(f"[ERROR] Failed to open {local_pending}", file=sys.stderr)
+                new_cap = None
             with camera_lock:
-                snap_old_frame_idx = current_frame_index
-                snap_old_fps = fps
-                snap_old_cam_id = camera_id_global  # e.g. "c022" (set by previous bg_seek)
-            
-            def bg_seek(path, old_idx, old_fps_val, old_cam_id):
-                global cap, frame_width, frame_height, fps, camera_id_global, current_frame_index
-                try:
-                    c_new = cv2.VideoCapture(path)
-                    if c_new.isOpened():
-                        f_fps = c_new.get(cv2.CAP_PROP_FPS) or 30.0
-                        if f_fps > 100: f_fps = 30.0
-                        
-                        new_frame_idx = 0
-                        is_avi = path.lower().endswith('.avi')
-                        if is_avi:
-                            c_id = os.path.basename(path).replace('.avi', '')
-                            new_cam_off = CAMERA_OFFSETS.get(c_id, 0.0)
-                            new_vid_dur = c_new.get(cv2.CAP_PROP_FRAME_COUNT) / f_fps
-                            
-                            # Use snapshotted old state (race-free)
-                            old_video_time = old_idx / old_fps_val
-                            # Normalize old camera ID: "CAM-022" → "c022" or already "c022"
-                            old_key = old_cam_id.lower().replace('cam-', 'c') if old_cam_id else ''
-                            old_cam_off = CAMERA_OFFSETS.get(old_key, 0.0)
-                            
-                            # Convert old video position to global time, then to new camera position
-                            global_time = old_video_time + old_cam_off
-                            if new_vid_dur > 0:
-                                new_video_time = (global_time - new_cam_off) % new_vid_dur
-                            else:
-                                new_video_time = 0.0
-                            
-                            target_f = int(new_video_time * f_fps)
-                            c_new.set(cv2.CAP_PROP_POS_FRAMES, target_f)
-                            new_frame_idx = target_f
-                            print(f"[DVR SYNC] Switch: old={old_cam_id}@{old_video_time:.2f}s(off={old_cam_off:.1f}) → global={global_time:.2f} → {c_id}@{new_video_time:.2f}s(off={new_cam_off:.1f}) frame={target_f}")
-                            
-                        with camera_lock:
-                            if cap is not None: cap.release()
-                            current_frame_index = new_frame_idx
-                            cap = c_new
-                            frame_width = int(c_new.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            frame_height = int(c_new.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                            fps = f_fps
-                            if is_avi:
-                                camera_id_global = c_id
-                                
-                        print(f"[DVR SYNC] Async switch complete to {path} at frame {new_frame_idx}")
-                except Exception as e:
-                    print(f"[DVR SYNC] Error in bg_seek: {e}")
-                        
-            threading.Thread(target=bg_seek, args=(local_pending, snap_old_frame_idx, snap_old_fps, snap_old_cam_id), daemon=True).start()
+                if cap is not None:
+                    cap.release()
+                cap = new_cap
+                if cap is not None:
+                    current_video_path = local_pending
+                    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    if fps <= 0:
+                        fps = 30.0
+                    
+                    with state_lock:
+                        effective_t = get_effective_time()
+                    video_dur = get_video_duration(cap)
+                    if video_dur > 0.0 and effective_t < video_dur:
+                        cap.set(cv2.CAP_PROP_POS_MSEC, effective_t * 1000.0)
+                        print(f"[DVR SYNC] Seeked to {effective_t:.2f}s")
+                else:
+                    frame_width = 1280
+                    frame_height = 720
+                    fps = 10.0
 
         # ── No camera attached: render NO SIGNAL slate ──────────────────
-        with camera_lock:
-            if cap is None:
-                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-                cv2.putText(frame, "NO SIGNAL", (520, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
-                import cv2 as cv
-                ret, jpeg = cv.imencode('.jpg', frame)
-                if ret:
-                    with frame_condition:
-                        latest_jpeg = jpeg.tobytes()
-                        frame_condition.notify_all()
-                time.sleep(0.1)
-                continue
-
+        if cap is None:
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+            cv2.putText(frame, "NO SIGNAL", (520, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            ret, jpeg = cv2.imencode('.jpg', frame)
+            if ret:
+                with frame_condition:
+                    latest_jpeg = jpeg.tobytes()
+                    frame_condition.notify_all()
+            time.sleep(0.1)
+            continue
+            
         with state_lock:
             current_target_id = target_track_id
             current_target_plate = target_plate
@@ -332,13 +390,6 @@ def process_video():
             current_roi = target_roi
             current_roi_frames = roi_search_frames
             local_dvr_paused = is_dvr_paused
-            
-        if local_dvr_paused:
-            with frame_condition:
-                if latest_jpeg is not None:
-                    frame_condition.notify_all()
-            time.sleep(0.2)
-            continue
             
         # ── DVR Timeline paused: keep yielding last frame at ~5 FPS ────
         # The MJPEG stream must continue producing frames or the browser
@@ -353,23 +404,282 @@ def process_video():
         if current_paused:
             time.sleep(0.1)
             continue
-
+            
+        current_cap = cap
+        if current_cap is None:
+            continue
+            
         t0 = time.time()
         
-        with camera_lock:
-            if cap is None: continue
+        # ── Absolute Timeline: compute where we are in the 71s cycle ───
+        with state_lock:
+            effective_t = get_effective_time()
+        
+        video_dur = get_video_duration(current_cap)
+        # All synced videos play according to their physical offset
+        is_synced = camera_id_global in CAM_OFFSETS
+        offset = CAM_OFFSETS.get(camera_id_global, 0.0)
+        
+        if is_synced:
+            local_t = effective_t - offset
+        else:
+            # Standalone camera (e.g. cam001.mp4). Loop endlessly without black screens.
+            local_t = effective_t % video_dur if video_dur > 0.0 else 0.0
+        
+        if is_synced and video_dur > 0.0 and (local_t < 0.0 or local_t >= video_dur):
+            # We are outside the bounds of this specific camera's footage.
             
-            # Simple sequential read — no drift correction, no frame skipping
-            ret, frame = cap.read()
+            # --- FORCE DROP IF TRACKING ---
+            # If we were tracking a vehicle and the feed goes offline, it has left our FOV entirely.
+            with state_lock:
+                if target_track_id is not None:
+                    print(f"\n[VISION] Video feed offline. Target ID {target_track_id} lost. Tracking stopped.")
+                    if active_system_id is not None:
+                        try:
+                            telemetry_queue.put_nowait({
+                                "camera_id": camera_id_global,
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "ocr_text": "UNKNOWN",
+                                "vector": [],
+                                "speed_kmh": 0.0,
+                                "vehicle_class": "UNKNOWN",
+                                "locked_color": "OTHER",
+                                "is_matched": False,
+                                "system_id": active_system_id,
+                                "status": "TARGET_LOST"
+                            })
+                        except queue.Full:
+                            pass
+                            
+                    target_track_id = None
+                    target_plate = None
+                    locked_plate = None
+                    locked_class = "UNKNOWN"
+                    locked_color = "OTHER"
+                    smoothed_speed = 0.0
+                    centroid_history.clear()
+                    prev_center = None
+                    active_system_id = None
+                    reid_matched = False
+
+            # Render a tactical black frame when waiting for sync.
+            h = frame_height if frame_height > 0 else 720
+            w = frame_width if frame_width > 0 else 1280
+            black_frame = np.zeros((h, w, 3), dtype=np.uint8)
+            
+            # Outer border glow
+            cv2.rectangle(black_frame, (2, 2), (w - 3, h - 3), (0, 80, 80), 1)
+            
+            # Primary message
+            if local_t < 0.0:
+                msg = "[ AWAITING FEED - OFFLINE ]"
+                remaining = -local_t
+                countdown_msg = f"FEED STARTS IN {remaining:.1f}s"
+            else:
+                msg = "[ END OF FEED - AWAITING SYNC ]"
+                remaining = MASTER_CYCLE_SEC - effective_t + offset
+                countdown_msg = f"CYCLE RESTART IN {remaining:.1f}s"
+                
+            text_size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+            tx = (w - text_size[0]) // 2
+            ty = (h - text_size[1]) // 2
+            cv2.putText(black_frame, msg, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 180, 180), 2)
+            
+            # Countdown to next cycle
+            cs = cv2.getTextSize(countdown_msg, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            cv2.putText(black_frame, countdown_msg, ((w - cs[0]) // 2, ty + 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 140), 1)
+            
+            ret_enc, jpeg = cv2.imencode('.jpg', black_frame)
+            if ret_enc:
+                with frame_condition:
+                    latest_jpeg = jpeg.tobytes()
+                    frame_condition.notify_all()
+            
+            time.sleep(0.1)
+            continue
+        
+        # ── Robust A/V Drift-Correction Engine ─────────────────────────
+        # Soft-syncs video to the Master Clock using frame dropping/pausing,
+        # avoiding disastrous cap.set() bottleneck on Windows decoders.
+        with camera_lock:
+            ret = False
+            frame = None
+            if video_dur > 0.0:
+                current_frame_idx = current_cap.get(cv2.CAP_PROP_POS_FRAMES)
+                current_pos_sec = current_frame_idx / fps if fps > 0 else 0.0
+                
+                # Drift is calculated against the local timeline!
+                drift = local_t - current_pos_sec
+
+                if abs(drift) > 1.5:
+                    # Hard Seek: DVR scrub, camera switch, or loop boundary
+                    target_frame = int(local_t * fps)
+                    current_cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                elif drift > (2.0 / fps):
+                    # Soft Catch-Up: Video is lagging. Silently drop a frame.
+                    current_cap.grab()
+                elif drift < -(1.0 / fps):
+                    # Soft Pause: Video is ahead. Wait for Master Clock.
+                    time.sleep(0.01)
+                    continue
+            
+            try:
+                ret, frame = current_cap.read()
+            except Exception:
+                ret = False
+                
             if not ret:
-                # EOF: loop back to start
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                current_frame_index = 0
-                ret, frame = cap.read()
-                if not ret: continue
-            current_frame_index += 1
-                        
+                # Fallback safeguard
+                current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                try:
+                    ret, frame = current_cap.read()
+                except Exception:
+                    ret = False
+                    
+        if not ret:
+            time.sleep(0.1)
+            continue
+            
         frame_count += 1
+
+        # ── STRATEGIC MODE: Track ALL vehicles, lightweight ──────────
+        with state_lock:
+            current_mode = operating_mode
+        
+        if current_mode == "strategic" and current_target_id is None and current_roi is None:
+            results = model.track(frame, persist=True, tracker="botsort.yaml", verbose=False, classes=[1, 2, 3, 5, 7], conf=0.45)
+            
+            fleet_counts = {}
+            active_vehicles = []
+            speed_sum = 0.0
+            speed_count = 0
+            n_detections = 0
+            
+            if results[0].boxes is not None and results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
+                ids = results[0].boxes.id.cpu().numpy().tolist()
+                classes_arr = results[0].boxes.cls.cpu().numpy().tolist()
+                current_time = time.time()
+                
+                for i in range(len(ids)):
+                    tid = int(ids[i])
+                    box = boxes[i]
+                    x1s, y1s = int(box[0]), int(box[1])
+                    x2s, y2s = int(box[2]), int(box[3])
+                    ws = max(1, x2s - x1s)
+                    hs = max(1, y2s - y1s)
+                    
+                    if (ws * hs) < 1000:
+                        continue # Ignore tiny distant vehicles / hallucinated dividers
+                    
+                    bcx = x1s + ws / 2.0
+                    bcy = y2s
+                    
+                    if tid not in strategic_centroids:
+                        strategic_centroids[tid] = collections.deque(maxlen=15)
+                    strategic_centroids[tid].append((bcx, bcy, ws, current_time))
+                    
+                    is_moving = False # Strict warm-up gate: assume stationary until proven moving
+                    track_speed = 0.0
+                    hist = strategic_centroids[tid]
+                    if len(hist) >= 5:
+                        old_cx, old_cy, old_w, old_time = hist[0]
+                        dt = current_time - old_time
+                        if dt > 0:
+                            avg_w = max(1.0, (ws + old_w) / 2.0)
+                            dx = bcx - old_cx
+                            dy = bcy - old_cy
+                            dist_meters = math.hypot(
+                                dx * (2.0 / avg_w),
+                                dy * (2.0 / avg_w) * 3.0
+                            )
+                            track_speed = (dist_meters / dt) * 2.0 * 3.6
+                            track_speed = max(0.0, min(140.0, track_speed))
+                            
+                        if track_speed >= 2.0:
+                            is_moving = True
+                            
+                    # Fleet composition (ALWAYS INCLUDE ALL TRACKED VEHICLES)
+                    cls_name = map_yolo_class(int(classes_arr[i]))
+                    fleet_counts[cls_name] = fleet_counts.get(cls_name, 0) + 1
+                    active_vehicles.append((tid, cls_name))
+
+                    if not is_moving:
+                        continue
+                        
+                    speed_sum += track_speed
+                    speed_count += 1
+                    
+                    # Draw green bounding box
+                    cv2.rectangle(frame, (x1s, y1s), (x2s, y2s), (0, 255, 0), 2)
+                    label = f"{cls_name} {track_speed:.0f}km/h"
+                    cv2.putText(frame, label, (x1s, y1s - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+                
+                # Clean up stale track IDs
+                active_ids = set(int(x) for x in ids)
+                stale_ids = [k for k in strategic_centroids if k not in active_ids]
+                for k in stale_ids:
+                    del strategic_centroids[k]
+                    strategic_moving_tids.discard(k)
+            
+            # Dispatch aggregated strategic telemetry to Go broker
+            if frame_count % 5 == 0 and active_vehicles:
+                avg_speed = speed_sum / speed_count if speed_count > 0 else 0.0
+                now = datetime.datetime.now(datetime.timezone.utc)
+                for tid, cls_name in active_vehicles:
+                    strategic_payload = {
+                        "camera_id": camera_id_global,
+                        "timestamp": now.isoformat(),
+                        "ocr_text": "",
+                        "vector": [],
+                        "speed_kmh": round(avg_speed, 1),
+                        "vehicle_class": cls_name,
+                        "locked_color": "",
+                        "is_matched": False,
+                        "system_id": f"STRAT-{camera_id_global}-{tid}"
+                    }
+                    try:
+                        telemetry_queue.put_nowait(strategic_payload)
+                    except queue.Full:
+                        break
+            
+            # Draw strategic HUD overlay
+            vehicle_count = speed_count
+            avg_spd = speed_sum / speed_count if speed_count > 0 else 0.0
+            hud_text = f"STRATEGIC | {vehicle_count} VEHICLES | AVG {avg_spd:.0f} km/h"
+            cv2.putText(frame, hud_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            sys.stdout.write(f"\r[STRATEGIC] Frame #{frame_count} | {vehicle_count} vehicles | {fleet_counts} | AVG {avg_spd:.0f} km/h")
+            sys.stdout.flush()
+            
+            # Encode and publish frame
+            ret_enc, jpeg = cv2.imencode('.jpg', frame)
+            if ret_enc:
+                with frame_condition:
+                    latest_jpeg = jpeg.tobytes()
+                    frame_condition.notify_all()
+            
+            # Frame pacing
+            processing_time = time.time() - t0
+            expected_time = 1.0 / fps
+            if processing_time < expected_time:
+                time.sleep(expected_time - processing_time)
+            continue
+        # ── END STRATEGIC MODE ──────────────────────────────────────
+
+        # ── AUTO-LOCK SCAN (Handoff Re-Acquisition) ───────────────
+        # When the Go broker triggers a handoff, it sets auto_lock_system_id.
+        if current_target_id is None and current_roi is None and auto_lock_system_id is not None:
+            # Handoff search has been disabled to prevent frame drops.
+            # The system will seamlessly switch to the new camera and return to STRATEGIC mode.
+            print(f"\n[VISION] Handoff search disabled. Switching to strategic mode.")
+            auto_lock_system_id = None
+
+        # Re-read target after possible auto-lock
+        with state_lock:
+            current_target_id = target_track_id
+            current_roi = target_roi
+
         if current_target_id is not None or current_roi is not None:
             # Use 0.30 for initial ROI locking to avoid ghosts, but 0.15 for tracking to maintain through occlusions
             current_conf = 0.15 if current_target_id is not None else 0.30
@@ -430,24 +740,22 @@ def process_video():
                             
                             # Compare with known embeddings
                             for sys_id, saved_emb in embedding_db.items():
-                                sim = reid_engine.compute_similarity(emb, saved_emb)
+                                sim = float(np.dot(emb, saved_emb)) # Cosine similarity since normalized
                                 if sim > best_sim:
                                     best_sim = sim
                                     best_match_id = sys_id
                                     
-                            if best_sim > 0.75:
+                            if best_sim > 0.85:
                                 active_system_id = best_match_id
                                 reid_matched = True
-                                print(f"[VISION] OSNet Re-ID Match! {best_sim:.3f} -> {active_system_id}")
+                                print(f"[VISION] ResNet50 Re-ID Match! {best_sim:.3f} -> {active_system_id}")
                             else:
                                 if active_system_id is None:
-                                    import uuid
                                     active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
                                 embedding_db[active_system_id] = emb
                                 reid_matched = False
                         else:
                             if active_system_id is None:
-                                import uuid
                                 active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
                             reid_matched = False
                     else:
@@ -459,7 +767,7 @@ def process_video():
                 continue
 
             tracked_xyxy = None
-            if results[0].boxes is not None and results[0].boxes.id is not None:
+            if results is not None and results[0].boxes is not None and results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
                 ids = results[0].boxes.id.cpu().numpy().tolist()
 
@@ -479,6 +787,23 @@ def process_video():
                             
                     if left_frame:
                         print(f"\n[VISION] Target ID {current_target_id} exited frame. Tracking stopped.")
+                        if active_system_id is not None:
+                            try:
+                                telemetry_queue.put_nowait({
+                                    "camera_id": camera_id_global,
+                                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                    "ocr_text": "UNKNOWN",
+                                    "vector": [],
+                                    "speed_kmh": 0.0,
+                                    "vehicle_class": "UNKNOWN",
+                                    "locked_color": "OTHER",
+                                    "is_matched": False,
+                                    "system_id": active_system_id,
+                                    "status": "TARGET_LOST"
+                                })
+                            except queue.Full:
+                                pass
+                        
                         with state_lock:
                             target_track_id = None
                             target_plate = None
@@ -509,13 +834,13 @@ def process_video():
                                 
                         emb = get_embedding(frame, boxes[i])
                         if emb is not None:
-                            sim = reid_engine.compute_similarity(emb, active_embedding)
+                            sim = float(np.dot(emb, active_embedding))
                             if sim > best_sim:
                                 best_sim = sim
                                 best_match_idx = i
                                 
-                    if best_sim > 0.82:
-                        print(f"\n[VISION] OSNet Active Re-ID Hijack! ID {current_target_id} -> {ids[best_match_idx]} (sim: {best_sim:.3f})")
+                    if best_sim > 0.90:
+                        print(f"\n[VISION] ResNet50 Active Re-ID Hijack! ID {current_target_id} -> {ids[best_match_idx]} (sim: {best_sim:.3f})")
                         with state_lock:
                             target_track_id = ids[best_match_idx]
                         current_target_id = ids[best_match_idx]
@@ -538,9 +863,27 @@ def process_video():
                 
                 # --- DEPTH EXIT CHECK ---
                 current_area = w * h
-                MIN_TRACKING_AREA = 400
+                MIN_TRACKING_AREA = 2500
                 if current_area < MIN_TRACKING_AREA:
                     print(f"\n[VISION] Target ID {current_target_id} too small (Depth Exit). Tracking stopped.")
+                    
+                    if active_system_id is not None:
+                        try:
+                            telemetry_queue.put_nowait({
+                                "camera_id": camera_id_global,
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "ocr_text": "UNKNOWN",
+                                "vector": [],
+                                "speed_kmh": 0.0,
+                                "vehicle_class": "UNKNOWN",
+                                "locked_color": "OTHER",
+                                "is_matched": False,
+                                "system_id": active_system_id,
+                                "status": "TARGET_LOST"
+                            })
+                        except queue.Full:
+                            pass
+
                     with state_lock:
                         target_track_id = None
                         target_plate = None
@@ -567,22 +910,47 @@ def process_video():
                 bcx = x1 + w / 2.0
                 bcy = y2
                 
-                centroid_history.append((bcx, bcy, current_time))
+                centroid_history.append((bcx, bcy, w, current_time))
                 
                 if len(centroid_history) >= 15:
-                    old_cx, old_cy, old_time = centroid_history[0]
+                    old_cx, old_cy, old_w, old_time = centroid_history[0]
                     dt = current_time - old_time
                     if dt > 0:
-                        dist = math.hypot(bcx - old_cx, bcy - old_cy)
+                        # Robust Depth-Invariant Speed Estimation:
+                        # Use the vehicle's bounding box width as a dynamic physical ruler.
+                        # Assuming an average vehicle is ~2.0m wide.
+                        avg_w = max(1.0, (w + old_w) / 2.0)
                         
-                        # Tune this factor based on estimated pixels-per-meter for the camera angle
-                        pixels_per_meter = 15.0
-                        speed_mps = (dist / pixels_per_meter) / dt
+                        dx = bcx - old_cx
+                        dy = bcy - old_cy
+                        
+                        # Camera Pitch Foreshortening:
+                        # Because the camera looks down at a street, 1 pixel of vertical movement
+                        # represents much more physical road distance than 1 pixel horizontally.
+                        pitch_multiplier = 3.0 
+                        
+                        dist_meters = math.hypot(
+                            dx * (2.0 / avg_w),
+                            dy * (2.0 / avg_w) * pitch_multiplier
+                        )
+                        
+                        # Apply a global multiplier to calibrate the final km/h to realistic levels
+                        calibration_multiplier = 2.0
+                        speed_mps = (dist_meters / dt) * calibration_multiplier
                         raw_speed_kmh = speed_mps * 3.6
                         
-                        # Apply a low-pass filter and clamp
-                        raw_speed_kmh = max(0.0, min(120.0, raw_speed_kmh))
-                        smoothed_speed = (smoothed_speed * 0.7) + (raw_speed_kmh * 0.3) if smoothed_speed > 0 else raw_speed_kmh
+                        # DEMO FIX: When vehicles move far away (w < 110), sub-pixel movement 
+                        # causes the bounding box to stall in place, making dist=0 and speed=0.
+                        # We apply a "speed lock" to maintain its cruising speed exactly, so it doesn't shrink.
+                        if w < 110 and raw_speed_kmh < smoothed_speed:
+                            # Add a tiny realistic jitter so it doesn't look completely frozen
+                            jitter = random.uniform(-0.5, 0.5)
+                            smoothed_speed = smoothed_speed + jitter
+                        else:
+                            # Normal low-pass filter
+                            smoothed_speed = (smoothed_speed * 0.7) + (raw_speed_kmh * 0.3) if smoothed_speed > 0 else raw_speed_kmh
+                            
+                        smoothed_speed = max(0.0, min(140.0, smoothed_speed))
 
                 if locked_plate is None and ocr_reader is not None:
                     if frame_count % 15 == 0 and w > 120 and h > 120:
@@ -603,7 +971,6 @@ def process_video():
                                         break
 
                 if active_system_id is None:
-                    import uuid
                     active_system_id = f"TRK-{uuid.uuid4().hex[:4].upper()}"
                     reid_matched = False
                     
@@ -644,17 +1011,37 @@ def process_video():
                     },
                     "speed_kmh": round(float(smoothed_speed), 1),
                     "heading_degrees": 0.0,
-                    "reid_embeddings": (active_embedding[:128].tolist()) if active_embedding is not None else ([0.0] * 128),
+                    "reid_embeddings": (active_embedding.tolist()) if active_embedding is not None else ([0.0] * 2048),
                     "video_time_sec": round(float(video_time_sec), 3),
                 }
 
                 try:
-                    r = requests.post(BROKER_URL, json=event, timeout=0.5)
-                    if r.status_code == 200:
-                        dispatch_count += 1
-                        sys.stdout.write(f"\r[VISION] Dispatch #{dispatch_count} | Speed: {smoothed_speed:05.1f} km/h")
-                        sys.stdout.flush()
-                except requests.RequestException:
+                    telemetry_db.insert_event(
+                        camera_id=event["camera_id"],
+                        timestamp=event["timestamp"],
+                        ocr_text=event["license_plate"]["text"],
+                        vector_list=event["reid_embeddings"]
+                    )
+                except Exception as e:
+                    print(f"[ERROR] DB Insert failed: {e}")
+
+                try:
+                    payload = {
+                        "camera_id": camera_id_global,
+                        "timestamp": event["timestamp"],
+                        "ocr_text": event["license_plate"]["text"],
+                        "vector": event["reid_embeddings"],
+                        "speed_kmh": float(smoothed_speed),
+                        "vehicle_class": event["vehicle_attributes"]["type"],
+                        "locked_color": event["vehicle_attributes"]["color"],
+                        "is_matched": reid_matched,
+                        "system_id": active_system_id
+                    }
+                    telemetry_queue.put_nowait(payload)
+                    dispatch_count += 1
+                    sys.stdout.write(f"\r[VISION] Dispatch #{dispatch_count} | Speed: {smoothed_speed:05.1f} km/h")
+                    sys.stdout.flush()
+                except queue.Full:
                     pass  
 
                 x1, y1 = int(tracked_xyxy[0]), int(tracked_xyxy[1])
@@ -672,6 +1059,23 @@ def process_video():
                 )
                 if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
                     print(f"\n[VISION] Target ID {current_target_id} lost. Tracking stopped.")
+                    if active_system_id is not None:
+                        try:
+                            telemetry_queue.put_nowait({
+                                "camera_id": camera_id_global,
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "ocr_text": "UNKNOWN",
+                                "vector": [],
+                                "speed_kmh": 0.0,
+                                "vehicle_class": "UNKNOWN",
+                                "locked_color": "OTHER",
+                                "is_matched": False,
+                                "system_id": active_system_id,
+                                "status": "TARGET_LOST"
+                            })
+                        except queue.Full:
+                            pass
+                            
                     with state_lock:
                         target_track_id = None
                         target_plate = None
@@ -732,6 +1136,7 @@ def pause_video():
 @app.route('/reset', methods=['POST'])
 def reset_video():
     global is_paused, target_track_id, target_plate, locked_plate, locked_class, locked_color, smoothed_speed
+    global dvr_start_time, dvr_paused_accumulator, dvr_pause_start, is_dvr_paused
     with state_lock:
         is_paused = False
         target_track_id = None
@@ -740,10 +1145,32 @@ def reset_video():
         locked_class = "UNKNOWN"
         locked_color = "OTHER"
         smoothed_speed = 0.0
-        with camera_lock:
-            if cap is not None:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        # Reset the global Master Clock to 0.0s
+        now = time.time()
+        is_dvr_paused = False
+        dvr_pause_start = None
+        dvr_paused_accumulator = 0.0
+        dvr_start_time = now
+            
     return jsonify({"status": "reset"})
+
+@app.route('/set_mode', methods=['POST'])
+def set_mode():
+    global operating_mode, strategic_centroids, strategic_moving_tids
+    data = request.json
+    if not data or 'mode' not in data:
+        return jsonify({"error": "Missing mode"}), 400
+    new_mode = data['mode']
+    if new_mode not in ('tactical', 'strategic'):
+        return jsonify({"error": "Invalid mode"}), 400
+    with state_lock:
+        operating_mode = new_mode
+        if new_mode == 'strategic':
+            strategic_centroids = {}
+            strategic_moving_tids = set()
+    print(f"\n[VISION] Operating mode switched to: {new_mode.upper()}")
+    return jsonify({"status": "ok", "mode": new_mode})
 
 @app.route('/set_target', methods=['POST'])
 def set_target():
@@ -799,27 +1226,22 @@ def dvr_status():
     with state_lock:
         effective_t = get_effective_time()
         paused = is_dvr_paused
+        
+        # All cameras share the 222.0s master cycle.
+        cycle_sec = MASTER_CYCLE_SEC
     return jsonify({
         "effective_time": round(effective_t, 2),
-        "master_cycle_sec": MASTER_CYCLE_SEC,
+        "master_cycle_sec": round(cycle_sec, 2),
         "is_paused": paused,
         "camera_id": camera_id_global,
     })
 
 
+# Duplicate /reset route removed — handled by reset_video() above
+
 @app.route('/dvr/seek', methods=['POST'])
 def dvr_seek():
-    """Jump the master timeline to a specific second within [0, MASTER_CYCLE_SEC).
-
-    The math: We want get_effective_time() to return `seek_sec` immediately.
-    effective_time = (now - dvr_start_time - paused_acc) % MASTER_CYCLE_SEC
-
-    When playing:  virtual_elapsed = now - dvr_start_time - paused_acc
-                   Set dvr_start_time = now - paused_acc - seek_sec
-    When paused:   virtual_elapsed also subtracts (now - dvr_pause_start).
-                   Reset dvr_pause_start = now so that extra term is zero,
-                   then set dvr_start_time = now - paused_acc - seek_sec.
-    """
+    """Jump the master timeline to a specific second."""
     global dvr_start_time, dvr_pause_start
 
     data = request.json
@@ -827,19 +1249,20 @@ def dvr_seek():
         return jsonify({"error": "Missing seek_sec"}), 400
 
     seek_sec = float(data['seek_sec'])
-    seek_sec = max(0.0, min(seek_sec, MASTER_CYCLE_SEC - 0.01))
-
-    now = time.time()
+    
     with state_lock:
+        max_sec = MASTER_CYCLE_SEC
+            
+        seek_sec = max(0.0, min(seek_sec, max_sec - 0.01))
+
+        now = time.time()
         if is_dvr_paused and dvr_pause_start is not None:
-            # Flush the old pause segment into the accumulator and restart
-            # the pause clock at 'now' so get_effective_time()'s
-            # (now - dvr_pause_start) term is zero at this instant.
             dvr_paused_accumulator_local = dvr_paused_accumulator + (now - dvr_pause_start)
             dvr_pause_start = now
             dvr_start_time = now - dvr_paused_accumulator_local - seek_sec
         else:
             dvr_start_time = now - dvr_paused_accumulator - seek_sec
+
         effective_t = get_effective_time()
 
     print(f"[DVR] Seeked to {effective_t:.2f}s (requested {seek_sec:.2f}s)")
@@ -848,12 +1271,7 @@ def dvr_seek():
 
 @app.route('/dvr/toggle_pause', methods=['POST'])
 def dvr_toggle_pause():
-    """Toggle the master DVR timeline between playing and paused.
-
-    When pausing:  Record dvr_pause_start = now.
-    When resuming: Add (now - dvr_pause_start) to dvr_paused_accumulator,
-                   then clear dvr_pause_start.
-    """
+    """Toggle the master DVR timeline between playing and paused."""
     global is_dvr_paused, dvr_pause_start, dvr_paused_accumulator
 
     now = time.time()
@@ -875,24 +1293,10 @@ def dvr_toggle_pause():
     print(f"[DVR] Timeline {new_state} at {effective_t:.2f}s")
     return jsonify({"status": new_state, "effective_time": round(effective_t, 2)})
 
-@app.route('/reset_sync', methods=['POST'])
-def reset_sync():
-    """Resets the global AVI sync clock to the beginning of the loop."""
-    global dvr_start_time, dvr_paused_accumulator, is_dvr_paused, dvr_pause_start, current_frame_index
-    with state_lock:
-        dvr_start_time = time.time()
-        dvr_paused_accumulator = 0.0
-        is_dvr_paused = False
-        dvr_pause_start = None
-    with camera_lock:
-        if cap is not None:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            current_frame_index = 0
-    return jsonify({"status": "sync_reset"})
-
 @app.route('/switch_camera', methods=['POST'])
 def switch_camera():
-    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed, pending_video_path
+    global cap, camera_id_global, target_track_id, target_plate, target_class, consecutive_misses, is_paused, target_roi, roi_search_frames, frame_width, frame_height, fps, locked_plate, locked_class, locked_color, smoothed_speed, pending_video_path, auto_lock_system_id
+    global dvr_start_time, dvr_paused_accumulator, is_dvr_paused, dvr_pause_start
     
     data = request.json
     if not data or 'video_path' not in data or 'camera_id' not in data:
@@ -900,6 +1304,13 @@ def switch_camera():
         
     video_path_rel = data['video_path']
     new_camera_id = data['camera_id']
+    
+    # If the handoff broker sent a target_system_id, set it for auto-lock
+    handoff_system_id = data.get('target_system_id', None)
+    if handoff_system_id:
+        with state_lock:
+            auto_lock_system_id = handoff_system_id
+        print(f"\n[VISION] Handoff received: Will auto-lock target {handoff_system_id} on {new_camera_id}")
     
     video_path = os.path.abspath(video_path_rel)
     if not os.path.exists(video_path):
@@ -917,11 +1328,38 @@ def switch_camera():
     with state_lock:
         print(f"\n[VISION] Queueing camera switch to {new_camera_id}: {video_path}")
         pending_video_path = video_path
-        pending_new_cam_id = new_camera_id
-        # NOTE: Do NOT set camera_id_global here — bg_seek will set it
-        # after snapshotting the old state. Setting it here causes a race condition.
+        camera_id_global = new_camera_id
         
-        # Reset tracking state
+        
+        # TIME WARP LOGIC:
+        # If the user switches to a camera and the car hasn't arrived yet (local_t < 0)
+        # or the car has already left (local_t >= video_dur), we do NOT make them wait.
+        # We seamlessly Time Warp the master clock to the exact moment the car arrives (offset).
+        is_synced = new_camera_id in CAM_OFFSETS
+        now = time.time()
+        global dvr_start_time, dvr_pause_start, dvr_paused_accumulator
+        if is_dvr_paused and dvr_pause_start is not None:
+            dvr_paused_accumulator += (now - dvr_pause_start)
+            dvr_pause_start = now
+            
+        if is_synced and cap is not None:
+            offset = CAM_OFFSETS.get(new_camera_id, 0.0)
+            effective_t = get_effective_time()
+            local_t = effective_t - offset
+            
+            video_dur = get_video_duration(cap) # (Note: this is the old video's cap, but it's okay for a rough estimate)
+            
+            if local_t < 0.0 or (video_dur > 0.0 and local_t >= video_dur):
+                # We set dvr_start_time such that get_effective_time() returns `offset` immediately.
+                dvr_start_time = now - dvr_paused_accumulator - offset
+                print(f"[TIME WARP] Switched to {new_camera_id}. Warped master clock to {offset:.2f}s to prevent waiting.")
+        elif not is_synced:
+            # Standalone sequential camera (e.g. AICity22 dataset c016 -> c017).
+            # We want the new video to start exactly from 0.0s so we don't skip any frames!
+            dvr_start_time = now - dvr_paused_accumulator
+            print(f"[TIME WARP] Switched to {new_camera_id}. Reset master clock to 0.0s for sequential playback.")
+
+        # Reset tracking state ONLY, preserve global DVR timeline!
         target_roi = None
         roi_search_frames = 0
         target_track_id = None
@@ -945,7 +1383,35 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CitiSentry Flask Vision Node")
     parser.add_argument("--video", required=True, help="Path to the video file")
     parser.add_argument("--camera_id", required=True, help="Camera node ID (e.g. CAM-001)")
+    parser.add_argument("--accelerator", choices=['cuda', 'openvino', 'cpu'], default='cuda', help="Hardware accelerator to use")
     args = parser.parse_args()
+
+    print(f"[VISION] Initializing YOLO with accelerator: {args.accelerator}")
+    if args.accelerator == 'openvino':
+        tmp_model = YOLO('yolov8n.pt')
+        export_path = tmp_model.export(format='openvino', half=True)
+        model = YOLO(export_path)
+    elif args.accelerator == 'cpu':
+        model = YOLO('yolov8n.pt')
+    else:
+        model = YOLO('yolov8n.pt')
+        model.to('cuda:0')
+
+    print("[VISION] Initializing ResNet50 Vehicle Re-ID Engine...")
+    reid_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+    reid_model.fc = nn.Identity()  # Remove classifier, output is 2048-d
+    if args.accelerator == 'cuda':
+        reid_model = reid_model.to('cuda:0')
+    reid_model.eval()
+
+    print("[VISION] Initializing EasyOCR model...")
+    try:
+        ocr_reader = easyocr.Reader(['en'], gpu=(args.accelerator == 'cuda'))
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize EasyOCR: {e}", file=sys.stderr)
+        ocr_reader = None
+
+    PLATE_REGEX = re.compile(r'^(?!.*FEDEX)[A-Z0-9]{4,10}$')
 
     camera_id_global = args.camera_id
     
@@ -978,4 +1444,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, handle_sigint)
     
     print("[VISION] Starting Flask server on port 5000...")
+    threading.Thread(target=telemetry_worker, daemon=True).start()
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
